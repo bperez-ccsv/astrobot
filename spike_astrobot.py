@@ -8,7 +8,7 @@ import time
 # PUERTOS
 # ==========================================================
 
-PUERTO_IDEABOARD       = port.A
+PUERTO_IDEABOARD       = port.E
 MOTOR_RUEDA_IZQUIERDA  = port.F
 MOTOR_RUEDA_DERECHA    = port.B
 MOTOR_GARRA            = port.C
