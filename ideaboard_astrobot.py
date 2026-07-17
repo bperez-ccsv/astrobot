@@ -43,7 +43,7 @@ sensor_externo_izquierdo = ib.DigitalIn(board.IO39, pull=ib.UP)
 SENSOR_NEGRO_ES_LOW = False
 CORRECCION_LINEA = 1
 SIGNO_CORRECCION_LINEA = -1
-MUESTRAS_CONFIRMACION_INTERSECCION = 1
+MUESTRAS_CONFIRMACION_INTERSECCION = 2
 MUESTRAS_LIBERACION_INTERSECCION = 3
 MOSTRAR_DIAGNOSTICO_SENSORES = True
 INTERVALO_DIAGNOSTICO_SENSORES = 0.3
@@ -60,7 +60,7 @@ SIGNO_CORRECCION = 1
 MOSTRAR_DIAGNOSTICO_CONTROL = False
 INTERVALO_DIAGNOSTICO = 1.0
 TOLERANCIA_ANGULO_GIRO = 1.5
-VELOCIDAD_ANGULAR_DETENIDA = 1.0
+VELOCIDAD_ANGULAR_DETENIDA = 3.0
 TIEMPO_ESTABLE_GIRO = 0.1
 TIEMPO_MAXIMO_GIRO_90 = 8.0
 MOSTRAR_DIAGNOSTICO_GIRO = False
@@ -81,6 +81,7 @@ COLOR_INTERSECCION_IZQUIERDA = (255, 0, 255)
 COLOR_INTERSECCION_T = (255, 0, 0)
 COLOR_ERROR = (255, 0, 0)
 COLOR_APAGADO = (0, 0, 0)
+COLOR_PAUSA = (255, 255, 0)
 
 def limitar(valor, minimo, maximo):
  return max(minimo, min(valor, maximo))
@@ -311,11 +312,31 @@ def procesar_comunicacion():
  return connected
 
 def mantener_comunicacion(segundos):
- fin = time.monotonic() + segundos
- while connected and time.monotonic() < fin:
-  procesar_comunicacion()
-  time.sleep(0.001)
+ fin=time.monotonic()+segundos
+ while connected and time.monotonic()<fin:
+  procesar_comunicacion();time.sleep(.001)
  return connected
+
+def gestionar_pausa(color_reanudar):
+ if not boton_presionado():return 0.0
+ mensaje_reanudar=mensaje_actual;inicio_pausa=time.monotonic();establecer_parada_global();ib.pixel=COLOR_PAUSA
+ print('Programa pausado.');print('Presione y suelte BOOT para continuar.')
+ while connected:
+  if not procesar_comunicacion():raise RuntimeError('Se perdio el enlace durante la pausa')
+  if boton_presionado():
+   establecer_mensaje(mensaje_reanudar);ib.pixel=color_reanudar;print('Programa reanudado.');return time.monotonic()-inicio_pausa
+  time.sleep(.001)
+ raise RuntimeError('Se perdio el enlace durante la pausa')
+
+def esperar_con_pausa(segundos,color_reanudar):
+ fin=time.monotonic()+segundos
+ while connected and time.monotonic()<fin:
+  if not procesar_comunicacion():return False
+  pausa=gestionar_pausa(color_reanudar)
+  if pausa>0:fin+=pausa
+  time.sleep(.001)
+ return connected
+
 
 def confirmar_parada(cambiar_color=True):
  establecer_parada_global()
@@ -434,34 +455,26 @@ def aplicar_control_rumbo(rumbo_actual, rumbo_objetivo, velocidad_base, direccio
  establecer_ruedas(velocidad_base, correccion_enviada, direccion=direccion_movimiento)
  return (rumbo_actual, tiempo_actual, correccion_logica, correccion_enviada, error_rumbo, velocidad_angular_z, fuente)
 
-def _mover_tiempo_con_giroscopio(segundos, velocidad_base, direccion_movimiento, color_led):
- validar_segundos(segundos)
- validar_velocidad(velocidad_base, 'velocidad_base')
- if velocidad_base == 0:
-  detenerse(segundos)
-  return
- if offset_giroscopio_z is None:
-  raise RuntimeError('El giroscopio no ha sido calibrado')
- ib.pixel = color_led
- rumbo_actual = 0.0
- rumbo_objetivo = 0.0
- tiempo_anterior = time.monotonic()
- fin = tiempo_anterior + segundos
- establecer_ruedas(velocidad_base, 0, direccion=direccion_movimiento)
+def _mover_tiempo_con_giroscopio(segundos,velocidad_base,direccion_movimiento,color_led):
+ validar_segundos(segundos);validar_velocidad(velocidad_base,'velocidad_base')
+ if velocidad_base==0:detenerse(segundos);return
+ if offset_giroscopio_z is None:raise RuntimeError('El giroscopio no ha sido calibrado')
+ ib.pixel=color_led;rumbo_actual=0.0;rumbo_objetivo=0.0;tiempo_anterior=time.monotonic();fin=tiempo_anterior+segundos
+ establecer_ruedas(velocidad_base,0,direccion=direccion_movimiento)
  try:
-  while connected and time.monotonic() < fin:
-   if not procesar_comunicacion():
-    raise RuntimeError('Se perdio el enlace durante el movimiento')
-   rumbo_actual, tiempo_anterior, _, _, _, _, _ = aplicar_control_rumbo(rumbo_actual, rumbo_objetivo, velocidad_base, direccion_movimiento, tiempo_anterior, correccion_infrarroja=None)
-   if not procesar_comunicacion():
-    raise RuntimeError('Se perdio el enlace durante el movimiento')
-   time.sleep(0.001)
+  while connected and time.monotonic()<fin:
+   if not procesar_comunicacion():raise RuntimeError('Se perdio el enlace durante el movimiento')
+   pausa=gestionar_pausa(color_led)
+   if pausa>0:fin+=pausa;tiempo_anterior=time.monotonic();continue
+   rumbo_actual,tiempo_anterior,_,_,_,_,_=aplicar_control_rumbo(rumbo_actual,rumbo_objetivo,velocidad_base,direccion_movimiento,tiempo_anterior,correccion_infrarroja=None)
+   if not procesar_comunicacion():raise RuntimeError('Se perdio el enlace durante el movimiento')
+   time.sleep(.001)
  except Exception:
   establecer_parada_global()
-  if connected:
-   mantener_comunicacion(TIEMPO_CONFIRMACION_PARADA)
+  if connected:mantener_comunicacion(TIEMPO_CONFIRMACION_PARADA)
   raise
  confirmar_parada(cambiar_color=True)
+
 
 def avance(segundos, velocidad):
  _mover_tiempo_con_giroscopio(segundos, velocidad, DIRECCION_ADELANTE, COLOR_AVANCE)
@@ -470,20 +483,15 @@ def reversa(segundos, velocidad):
  _mover_tiempo_con_giroscopio(segundos, velocidad, DIRECCION_ATRAS, COLOR_REVERSA)
 
 def detenerse(segundos):
- validar_segundos(segundos)
- establecer_parada_global()
- ib.pixel = COLOR_DETENERSE
- if not mantener_comunicacion(segundos):
-  raise RuntimeError('Se perdio el enlace durante detenerse()')
+ validar_segundos(segundos);establecer_parada_global();ib.pixel=COLOR_DETENERSE
+ if not esperar_con_pausa(segundos,COLOR_DETENERSE):raise RuntimeError('Se perdio el enlace durante detenerse()')
 
-def ejecutar_accesorios(segundos, velocidad_garra, velocidad_pala, direccion='adelante', color_led=COLOR_GARRA_PALA):
- validar_segundos(segundos)
- establecer_accesorios(velocidad_garra, velocidad_pala, direccion)
- ib.pixel = color_led
- if not mantener_comunicacion(segundos):
-  establecer_parada_global()
-  raise RuntimeError('Se perdio el enlace durante accesorios')
+
+def ejecutar_accesorios(segundos,velocidad_garra,velocidad_pala,direccion='adelante',color_led=COLOR_GARRA_PALA):
+ validar_segundos(segundos);establecer_accesorios(velocidad_garra,velocidad_pala,direccion);ib.pixel=color_led
+ if not esperar_con_pausa(segundos,color_led):establecer_parada_global();raise RuntimeError('Se perdio el enlace durante accesorios')
  confirmar_parada(cambiar_color=True)
+
 
 def mover_garra(segundos, velocidad, direccion='adelante'):
  ejecutar_accesorios(segundos, velocidad_garra=velocidad, velocidad_pala=0, direccion=direccion, color_led=COLOR_GARRA)
@@ -532,6 +540,9 @@ def girar(direccion, angulo, velocidad_base):
   while True:
    if not procesar_comunicacion():
     raise RuntimeError('Se perdio el enlace durante girar()')
+   pausa=gestionar_pausa(COLOR_GIRO)
+   if pausa>0:
+    tiempo_inicio+=pausa;tiempo_anterior=time.monotonic();tiempo_estable=None;continue
    tiempo_actual = time.monotonic()
    dt = tiempo_actual - tiempo_anterior
    tiempo_anterior = tiempo_actual
@@ -540,7 +551,10 @@ def girar(direccion, angulo, velocidad_base):
    if abs(velocidad_angular_z) < ZONA_MUERTA_GIRO:
     velocidad_angular_z = 0.0
    if 0 < dt <= 0.1:
-    incremento = abs(velocidad_angular_z) * dt
+    if comando_detenido and abs(velocidad_angular_z) <= VELOCIDAD_ANGULAR_DETENIDA:
+     incremento = 0.0
+    else:
+     incremento = abs(velocidad_angular_z) * dt
     if direccion_actual == direccion:
      angulo_medido += incremento
     else:
@@ -635,6 +649,9 @@ def _mover_hasta_interseccion(numero_interseccion, velocidad_base, direccion_mov
   while contador_intersecciones < numero_interseccion:
    if not procesar_comunicacion():
     raise RuntimeError('Se perdio la conexion durante ' + ('reversa_hasta()' if es_reversa else 'avance_hasta()'))
+   color_movimiento=COLOR_REVERSA_HASTA if es_reversa else COLOR_AVANCE_HASTA
+   pausa=gestionar_pausa(color_movimiento)
+   if pausa>0:tiempo_anterior=time.monotonic();ultimo_diagnostico_sensores=tiempo_anterior;continue
    nivel_ei, nivel_ci, nivel_c, nivel_cd, nivel_ed, ext_izq, cen_izq, centro, cen_der, ext_der = leer_sensores_linea()
    ahora = time.monotonic()
    if MOSTRAR_DIAGNOSTICO_SENSORES:

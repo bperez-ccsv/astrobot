@@ -163,7 +163,7 @@ INTERVALO_DIAGNOSTICO = 1.0
 # ==========================================================
 
 TOLERANCIA_ANGULO_GIRO = 1.5
-VELOCIDAD_ANGULAR_DETENIDA = 1.0
+VELOCIDAD_ANGULAR_DETENIDA = 3.0
 TIEMPO_ESTABLE_GIRO = 0.10
 TIEMPO_MAXIMO_GIRO_90 = 8.0
 
@@ -191,6 +191,7 @@ COLOR_INTERSECCION_IZQUIERDA = (255, 0, 255)
 COLOR_INTERSECCION_T = (255, 0, 0)
 COLOR_ERROR = (255, 0, 0)
 COLOR_APAGADO = (0, 0, 0)
+COLOR_PAUSA = (255, 255, 0)
 
 
 # ==========================================================
@@ -619,6 +620,63 @@ def mantener_comunicacion(segundos):
     return connected
 
 
+def gestionar_pausa(color_reanudar):
+    """
+    Revisa el boton BOOT durante la ejecucion de una funcion del robot.
+
+    Primera pulsacion:
+        detiene los motores y pausa la funcion actual.
+
+    Segunda pulsacion:
+        restaura el comando anterior y continua desde el mismo punto.
+
+    Retorna la cantidad de segundos que el programa permanecio pausado.
+    """
+    if not boton_presionado():
+        return 0.0
+
+    mensaje_reanudar = mensaje_actual
+    inicio_pausa = time.monotonic()
+
+    establecer_parada_global()
+    ib.pixel = COLOR_PAUSA
+
+    print("Programa pausado.")
+    print("Presione y suelte BOOT para continuar.")
+
+    while connected:
+        if not procesar_comunicacion():
+            raise RuntimeError("Se perdio el enlace durante la pausa")
+
+        if boton_presionado():
+            establecer_mensaje(mensaje_reanudar)
+            ib.pixel = color_reanudar
+            print("Programa reanudado.")
+            return time.monotonic() - inicio_pausa
+
+        time.sleep(0.001)
+
+    raise RuntimeError("Se perdio el enlace durante la pausa")
+
+
+def esperar_con_pausa(segundos, color_reanudar):
+    """Mantiene la comunicacion y excluye la pausa del tiempo solicitado."""
+    fin = time.monotonic() + segundos
+
+    while connected and time.monotonic() < fin:
+        if not procesar_comunicacion():
+            return False
+
+        duracion_pausa = gestionar_pausa(color_reanudar)
+
+        if duracion_pausa > 0:
+            fin += duracion_pausa
+
+        time.sleep(0.001)
+
+    return connected
+
+
 def confirmar_parada(cambiar_color=True):
     establecer_parada_global()
 
@@ -910,6 +968,13 @@ def _mover_tiempo_con_giroscopio(
             if not procesar_comunicacion():
                 raise RuntimeError("Se perdio el enlace durante el movimiento")
 
+            duracion_pausa = gestionar_pausa(color_led)
+
+            if duracion_pausa > 0:
+                fin += duracion_pausa
+                tiempo_anterior = time.monotonic()
+                continue
+
             (
                 rumbo_actual,
                 tiempo_anterior,
@@ -963,7 +1028,7 @@ def detenerse(segundos):
     establecer_parada_global()
     ib.pixel = COLOR_DETENERSE
 
-    if not mantener_comunicacion(segundos):
+    if not esperar_con_pausa(segundos, COLOR_DETENERSE):
         raise RuntimeError("Se perdio el enlace durante detenerse()")
 
 
@@ -989,7 +1054,7 @@ def ejecutar_accesorios(
 
     ib.pixel = color_led
 
-    if not mantener_comunicacion(segundos):
+    if not esperar_con_pausa(segundos, color_led):
         establecer_parada_global()
         raise RuntimeError("Se perdio el enlace durante accesorios")
 
@@ -1099,6 +1164,14 @@ def girar(direccion, angulo, velocidad_base):
             if not procesar_comunicacion():
                 raise RuntimeError("Se perdio el enlace durante girar()")
 
+            duracion_pausa = gestionar_pausa(COLOR_GIRO)
+
+            if duracion_pausa > 0:
+                tiempo_inicio += duracion_pausa
+                tiempo_anterior = time.monotonic()
+                tiempo_estable = None
+                continue
+
             tiempo_actual = time.monotonic()
             dt = tiempo_actual - tiempo_anterior
             tiempo_anterior = tiempo_actual
@@ -1112,7 +1185,18 @@ def girar(direccion, angulo, velocidad_base):
                 velocidad_angular_z = 0.0
 
             if 0 < dt <= 0.1:
-                incremento = abs(velocidad_angular_z) * dt
+                # Cuando los motores ya recibieron la orden de detenerse,
+                # las pequenas lecturas restantes pertenecen principalmente
+                # al ruido del giroscopio. No deben seguir acumulandose como
+                # si el robot continuara girando.
+                if (
+                    comando_detenido
+                    and abs(velocidad_angular_z)
+                    <= VELOCIDAD_ANGULAR_DETENIDA
+                ):
+                    incremento = 0.0
+                else:
+                    incremento = abs(velocidad_angular_z) * dt
 
                 if direccion_actual == direccion:
                     angulo_medido += incremento
@@ -1310,6 +1394,18 @@ def _mover_hasta_interseccion(
                     "Se perdio la conexion durante "
                     + ("reversa_hasta()" if es_reversa else "avance_hasta()")
                 )
+
+            color_movimiento = (
+                COLOR_REVERSA_HASTA
+                if es_reversa
+                else COLOR_AVANCE_HASTA
+            )
+            duracion_pausa = gestionar_pausa(color_movimiento)
+
+            if duracion_pausa > 0:
+                tiempo_anterior = time.monotonic()
+                ultimo_diagnostico_sensores = tiempo_anterior
+                continue
 
             (
                 nivel_ei,
@@ -1525,6 +1621,7 @@ def iniciar(programa_usuario):
     cada vez que el usuario presiona y suelta el boton BOOT.
 
     El giroscopio se calibra automaticamente antes de cada ejecucion.
+Durante programa_usuario(), BOOT pausa y reanuda las funciones.
 
     Uso en code.py:
 
