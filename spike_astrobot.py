@@ -8,11 +8,11 @@ import time
 # PUERTOS
 # ==========================================================
 
-PUERTO_IDEABOARD       = port.E
-MOTOR_RUEDA_IZQUIERDA  = port.F
+PUERTO_IDEABOARD      = port.E
+MOTOR_RUEDA_IZQUIERDA = port.F
 MOTOR_RUEDA_DERECHA    = port.B
 MOTOR_GARRA            = port.C
-MOTOR_PALA             = port.D
+MOTOR_PALA            = port.D
 
 
 # ==========================================================
@@ -23,14 +23,12 @@ MOTOR_PALA             = port.D
 SENTIDO_MOTOR_RUEDA_IZQUIERDA = 1
 SENTIDO_MOTOR_RUEDA_DERECHA = -1
 SENTIDO_MOTOR_GARRA = 1
-SENTIDO_MOTOR_PALA = 1
+SENTIDO_MOTOR_PALA = -1
 
-# Sentido del torque bajo que evita que la pala caiga.
-# Cambiar a -1 si el sostenimiento mueve la pala hacia el lado incorrecto.
-SENTIDO_MANTENER_PALA = 1
+# La pala se mantiene con el control de posicion motor.HOLD.
+# No se aplica velocidad continua porque moveria la pala lentamente.
 
 FACTOR_GRADOS_POR_SEGUNDO = 10
-VELOCIDAD_MANTENER_PALA = 1# Aproximadamente 1 %
 
 
 # ==========================================================
@@ -49,6 +47,7 @@ MENSAJE_DETENER = 0b00000011
 MOSTRAR_DIAGNOSTICO = True
 
 ultimo_byte = None
+seguridad_desconexion_aplicada = False
 
 
 # ==========================================================
@@ -145,6 +144,20 @@ def detener_motor_seguro(puerto_motor):
         pass
 
 
+def detener_motor_manteniendo(puerto_motor):
+    """Detiene el motor y conserva activamente su posicion actual."""
+    try:
+        motor.stop(puerto_motor, stop=motor.HOLD)
+        return True
+    except Exception as error_hold:
+        # Compatibilidad defensiva con firmware que no exponga HOLD.
+        try:
+            motor.stop(puerto_motor)
+            return False
+        except Exception:
+            raise error_hold
+
+
 def detener_ruedas():
     detener_motor_seguro(MOTOR_RUEDA_IZQUIERDA)
     detener_motor_seguro(MOTOR_RUEDA_DERECHA)
@@ -192,10 +205,10 @@ def enviar_soltar_posicion_pala():
 
 def enviar_mantener_posicion_pala():
     """
-    Equivalente al mensaje MantenerPosicionPala.
+    Detiene la pala y mantiene exactamente la posicion alcanzada.
 
-    Registra la posicion alcanzada y aplica un torque muy bajo en el
-    sentido configurado para contrarrestar el peso de la pala.
+    motor.HOLD sustituye el torque continuo usado anteriormente. Ese torque
+    hacia un solo sentido hacia que la pala subiera despues de bajarla.
     """
     global pala_en_movimiento
     global pala_manteniendo_posicion
@@ -206,15 +219,7 @@ def enviar_mantener_posicion_pala():
     except Exception:
         posicion_pala = None
 
-    velocidad_sosten_dps = int(
-        VELOCIDAD_MANTENER_PALA
-        * FACTOR_GRADOS_POR_SEGUNDO
-        * SENTIDO_MOTOR_PALA
-        * SENTIDO_MANTENER_PALA
-    )
-
-    motor.run(MOTOR_PALA, velocidad_sosten_dps)
-
+    hold_disponible = detener_motor_manteniendo(MOTOR_PALA)
     pala_en_movimiento = False
     pala_manteniendo_posicion = True
 
@@ -222,8 +227,7 @@ def enviar_mantener_posicion_pala():
         print(
             "Evento: MantenerPosicionPala",
             "| Posicion:", posicion_pala,
-            "| Velocidad sosten:", velocidad_sosten_dps,
-            "dps"
+            "| Modo:", "HOLD" if hold_disponible else "BRAKE"
         )
 
 
@@ -241,6 +245,18 @@ def detener_seguro_con_pala():
     Detiene ruedas y garra. Si la pala estaba moviendose, activa el
     sostenimiento en vez de dejarla caer.
     """
+    detener_ruedas()
+    detener_garra()
+
+    if pala_en_movimiento:
+        try:
+            enviar_mantener_posicion_pala()
+        except Exception:
+            detener_pala_totalmente()
+
+
+def aplicar_seguridad_desconexion():
+    """Detiene actuadores cuando IdeaBoard deja de estar disponible."""
     detener_ruedas()
     detener_garra()
 
@@ -420,6 +436,7 @@ while True:
         valor_firmado = extraer_valor(datos)
 
         if valor_firmado is not None:
+            seguridad_desconexion_aplicada = False
             byte = convertir_a_byte(valor_firmado)
 
             # IdeaBoard repite el byte durante el movimiento. Solamente un
@@ -438,24 +455,24 @@ while True:
                 ultimo_byte = byte
 
     except Exception as error:
-        # Esta temporizacion reproduce exactamente el comportamiento de la
-        # version Spike_LPF2_velocidad_correccion_giro_eje_v5.py:
-        #
-        #100 ms dentro del error ENODEV
-        #+ 20 ms al final del ciclo
-        #= aproximadamente 120 ms sin una nueva consulta al puerto D.
-        #
-        # IdeaBoard necesita mas de 100 ms continuos con RX alto para salir
-        # de wait_for_hub_idle() e iniciar el handshake.
+        # Ante ENODEV tambien se detienen las ruedas. La version anterior
+        # conservaba el ultimo comando y el robot podia seguir girando.
         ultimo_byte = None
 
         errno = getattr(error, "errno", None)
         es_enodev = errno == 19 or "ENODEV" in str(error)
 
-        if not es_enodev:
-            detener_seguro_con_pala()
-            print("Error de comunicacion o decodificacion:", error)
+        if not seguridad_desconexion_aplicada:
+            aplicar_seguridad_desconexion()
+            seguridad_desconexion_aplicada = True
 
+            if es_enodev:
+                print("IdeaBoard desconectada. Motores en estado seguro.")
+            else:
+                print("Error de comunicacion o decodificacion:", error)
+
+        # Conservar la ventana requerida por el handshake:
+        # 100 ms aqui + 20 ms al final = aproximadamente 120 ms.
         time.sleep(0.10)
 
     # No reducir esta pausa durante la etapa de handshake.
