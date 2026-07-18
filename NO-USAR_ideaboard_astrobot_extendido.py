@@ -116,7 +116,7 @@ SENSOR_NEGRO_ES_LOW = False
 CORRECCION_LINEA = 1
 
 # Cambiar a -1 si los sensores internos corrigen hacia el lado equivocado.
-SIGNO_CORRECCION_LINEA = -1
+SIGNO_CORRECCION_LINEA = 1
 
 # Una lectura LOW de un sensor externo se registra inmediatamente.
 MUESTRAS_CONFIRMACION_INTERSECCION = 1
