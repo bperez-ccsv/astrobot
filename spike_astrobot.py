@@ -20,14 +20,12 @@ MOTOR_PALA            = port.D
 # ==========================================================
 
 # Ajustar solamente estos signos si un motor gira al reves.
-SENTIDO_MOTOR_RUEDA_IZQUIERDA = 1
-SENTIDO_MOTOR_RUEDA_DERECHA = -1
+SENTIDO_MOTOR_RUEDA_IZQUIERDA = -1
+SENTIDO_MOTOR_RUEDA_DERECHA = 1
 SENTIDO_MOTOR_GARRA = 1
 SENTIDO_MOTOR_PALA = -1
 
-# La pala se mantiene con el control de posicion motor.HOLD.
-# No se aplica velocidad continua porque moveria la pala lentamente.
-
+# La pala conserva la posicion mediante motor.HOLD.
 FACTOR_GRADOS_POR_SEGUNDO = 10
 
 
@@ -48,6 +46,30 @@ MOSTRAR_DIAGNOSTICO = True
 
 ultimo_byte = None
 seguridad_desconexion_aplicada = False
+
+# Protocolo de movimiento por distancia.
+CONTROL_DISTANCIA_INICIO = 0xFF
+CONTROL_DISTANCIA_PAUSA = 0xF7
+CONTROL_DISTANCIA_REANUDAR = 0xEF
+CONTROL_DISTANCIA_CANCELAR = 0xE7
+recepcion_distancia_estado = 0
+recepcion_distancia_direccion = 0
+recepcion_distancia_velocidad = 0
+recepcion_distancia_grados = 0
+recepcion_distancia_bloques = 0
+recepcion_distancia_toggle = 0
+
+movimiento_distancia_activo = False
+movimiento_distancia_pausado = False
+distancia_objetivo_grados = 0
+distancia_direccion = 0
+distancia_velocidad = 0
+distancia_correccion = 0
+distancia_terminada = False
+distancia_inicio_izquierda = 0
+distancia_inicio_derecha = 0
+distancia_izquierda_completa = False
+distancia_derecha_completa = False
 
 
 # ==========================================================
@@ -145,12 +167,10 @@ def detener_motor_seguro(puerto_motor):
 
 
 def detener_motor_manteniendo(puerto_motor):
-    """Detiene el motor y conserva activamente su posicion actual."""
     try:
         motor.stop(puerto_motor, stop=motor.HOLD)
         return True
     except Exception as error_hold:
-        # Compatibilidad defensiva con firmware que no exponga HOLD.
         try:
             motor.stop(puerto_motor)
             return False
@@ -204,12 +224,6 @@ def enviar_soltar_posicion_pala():
 
 
 def enviar_mantener_posicion_pala():
-    """
-    Detiene la pala y mantiene exactamente la posicion alcanzada.
-
-    motor.HOLD sustituye el torque continuo usado anteriormente. Ese torque
-    hacia un solo sentido hacia que la pala subiera despues de bajarla.
-    """
     global pala_en_movimiento
     global pala_manteniendo_posicion
     global posicion_pala
@@ -255,16 +269,297 @@ def detener_seguro_con_pala():
             detener_pala_totalmente()
 
 
+# ==========================================================
+# MOVIMIENTO POR DISTANCIA
+# ==========================================================
+
+
+def cancelar_movimiento_distancia():
+    global movimiento_distancia_activo
+    global movimiento_distancia_pausado
+    global distancia_correccion
+    global distancia_terminada
+
+    detener_ruedas()
+    movimiento_distancia_activo = False
+    movimiento_distancia_pausado = False
+    distancia_correccion = 0
+    distancia_terminada = False
+
+
+
+def aplicar_velocidades_movimiento_distancia():
+    """Aplica velocidad base y corrección sin reiniciar los encoders."""
+    if (
+        not movimiento_distancia_activo
+        or movimiento_distancia_pausado
+        or distancia_terminada
+    ):
+        return
+
+    signo = 1 if distancia_direccion == DIRECCION_ADELANTE else -1
+    velocidad_izquierda = (
+        distancia_velocidad - distancia_correccion
+    ) * signo
+    velocidad_derecha = (
+        distancia_velocidad + distancia_correccion
+    ) * signo
+
+    if not distancia_izquierda_completa:
+        ejecutar_motor(
+            MOTOR_RUEDA_IZQUIERDA,
+            velocidad_izquierda,
+            SENTIDO_MOTOR_RUEDA_IZQUIERDA
+        )
+
+    if not distancia_derecha_completa:
+        ejecutar_motor(
+            MOTOR_RUEDA_DERECHA,
+            velocidad_derecha,
+            SENTIDO_MOTOR_RUEDA_DERECHA
+        )
+
+
+def iniciar_movimiento_distancia(direccion, velocidad, grados_objetivo):
+    global movimiento_distancia_activo
+    global movimiento_distancia_pausado
+    global distancia_objetivo_grados
+    global distancia_direccion
+    global distancia_velocidad
+    global distancia_correccion
+    global distancia_terminada
+    global distancia_inicio_izquierda
+    global distancia_inicio_derecha
+    global distancia_izquierda_completa
+    global distancia_derecha_completa
+
+    detener_garra()
+    distancia_direccion = direccion
+    distancia_velocidad = velocidad
+    distancia_correccion = 0
+    distancia_terminada = False
+    distancia_objetivo_grados = grados_objetivo
+    distancia_inicio_izquierda = motor.relative_position(
+        MOTOR_RUEDA_IZQUIERDA
+    )
+    distancia_inicio_derecha = motor.relative_position(
+        MOTOR_RUEDA_DERECHA
+    )
+    distancia_izquierda_completa = False
+    distancia_derecha_completa = False
+    movimiento_distancia_activo = True
+    movimiento_distancia_pausado = False
+
+    aplicar_velocidades_movimiento_distancia()
+
+    print(
+        "Distancia iniciada | Grados:", grados_objetivo,
+        "| Velocidad:", velocidad,
+        "| Direccion:",
+        "adelante" if direccion == DIRECCION_ADELANTE else "atras",
+        "| Control: encoder + correccion externa"
+    )
+
+
+
+def pausar_movimiento_distancia():
+    global movimiento_distancia_pausado
+
+    if (
+        movimiento_distancia_activo
+        and not movimiento_distancia_pausado
+        and not distancia_terminada
+    ):
+        detener_ruedas()
+        movimiento_distancia_pausado = True
+        print("Distancia pausada")
+
+
+
+def reanudar_movimiento_distancia():
+    global movimiento_distancia_pausado
+
+    if (
+        movimiento_distancia_activo
+        and movimiento_distancia_pausado
+        and not distancia_terminada
+    ):
+        movimiento_distancia_pausado = False
+        aplicar_velocidades_movimiento_distancia()
+        print("Distancia reanudada")
+
+
+
+def actualizar_movimiento_distancia():
+    global distancia_izquierda_completa
+    global distancia_derecha_completa
+    global distancia_terminada
+
+    if (
+        not movimiento_distancia_activo
+        or movimiento_distancia_pausado
+        or distancia_terminada
+    ):
+        return
+
+    actual_izquierda = motor.relative_position(MOTOR_RUEDA_IZQUIERDA)
+    actual_derecha = motor.relative_position(MOTOR_RUEDA_DERECHA)
+    recorrido_izquierda = abs(
+        actual_izquierda - distancia_inicio_izquierda
+    )
+    recorrido_derecha = abs(
+        actual_derecha - distancia_inicio_derecha
+    )
+
+    if (
+        not distancia_izquierda_completa
+        and recorrido_izquierda >= distancia_objetivo_grados
+    ):
+        motor.stop(MOTOR_RUEDA_IZQUIERDA)
+        distancia_izquierda_completa = True
+
+    if (
+        not distancia_derecha_completa
+        and recorrido_derecha >= distancia_objetivo_grados
+    ):
+        motor.stop(MOTOR_RUEDA_DERECHA)
+        distancia_derecha_completa = True
+
+    if distancia_izquierda_completa and distancia_derecha_completa:
+        detener_ruedas()
+        distancia_terminada = True
+        print("Distancia terminada | Grados:", distancia_objetivo_grados)
+
+
+
+def actualizar_correccion_movimiento_distancia(
+    direccion,
+    indice_velocidad,
+    indice_correccion
+):
+    """
+    Actualiza las velocidades diferenciales sin reiniciar el objetivo.
+
+    Retorna None cuando el byte debe procesarse como una orden normal.
+    """
+    global distancia_velocidad
+    global distancia_correccion
+
+    if not movimiento_distancia_activo:
+        return None
+
+    if indice_correccion == CODIGO_GIRO_SOBRE_EJE:
+        return None
+
+    # Una orden de velocidad cero cierra la sesión de distancia.
+    if indice_velocidad == 0:
+        cancelar_movimiento_distancia()
+        return {"modo": "distancia_finalizada_por_ideaboard"}
+
+    # Un cambio de dirección corresponde a una nueva orden normal.
+    if direccion != distancia_direccion:
+        return None
+
+    distancia_velocidad = indice_velocidad * 10
+    distancia_correccion = indice_correccion - 3
+
+    # Si los encoders ya terminaron, se conserva la parada aunque IdeaBoard
+    # siga enviando correcciones durante su tiempo de espera conservador.
+    if not distancia_terminada and not movimiento_distancia_pausado:
+        aplicar_velocidades_movimiento_distancia()
+
+    return {
+        "modo": "distancia_correccion_gyro",
+        "base": distancia_velocidad,
+        "correccion": distancia_correccion,
+        "terminada": distancia_terminada
+    }
+
+
+def es_paquete_control_distancia(byte):
+    return (byte & 0x87) == 0x87
+
+
+def procesar_control_distancia(byte):
+    global recepcion_distancia_estado
+    global recepcion_distancia_direccion
+    global recepcion_distancia_velocidad
+    global recepcion_distancia_grados
+    global recepcion_distancia_bloques
+    global recepcion_distancia_toggle
+
+    if recepcion_distancia_estado == 0:
+        if byte == CONTROL_DISTANCIA_INICIO:
+            if movimiento_distancia_activo:
+                cancelar_movimiento_distancia()
+            recepcion_distancia_estado = 1
+            return {"modo": "distancia_inicio"}
+
+        if byte == CONTROL_DISTANCIA_PAUSA and movimiento_distancia_activo:
+            pausar_movimiento_distancia()
+            return {"modo": "distancia_pausa"}
+
+        if byte == CONTROL_DISTANCIA_REANUDAR and movimiento_distancia_activo:
+            reanudar_movimiento_distancia()
+            return {"modo": "distancia_reanudar"}
+
+        if byte == CONTROL_DISTANCIA_CANCELAR and movimiento_distancia_activo:
+            cancelar_movimiento_distancia()
+            return {"modo": "distancia_cancelar"}
+
+        return None
+
+    if not es_paquete_control_distancia(byte):
+        recepcion_distancia_estado = 0
+        return None
+
+    nibble = (byte >> 3) & 0x0F
+
+    if recepcion_distancia_estado == 1:
+        direccion = (nibble >> 3) & 1
+        indice_velocidad = nibble & 0x07
+        if indice_velocidad < 1 or indice_velocidad > 6:
+            recepcion_distancia_estado = 0
+            raise ValueError("Velocidad de distancia invalida")
+
+        recepcion_distancia_direccion = direccion
+        recepcion_distancia_velocidad = indice_velocidad * 10
+        recepcion_distancia_grados = 0
+        recepcion_distancia_bloques = 0
+        recepcion_distancia_toggle = 1 - direccion
+        recepcion_distancia_estado = 2
+        return {"modo": "distancia_metadata"}
+
+    toggle = (nibble >> 3) & 1
+    bloque = nibble & 0x07
+    if toggle != recepcion_distancia_toggle:
+        recepcion_distancia_estado = 0
+        raise ValueError("Secuencia de distancia invalida")
+
+    recepcion_distancia_grados = (recepcion_distancia_grados << 3) | bloque
+    recepcion_distancia_bloques += 1
+    recepcion_distancia_toggle = 1 - recepcion_distancia_toggle
+
+    if recepcion_distancia_bloques >= 6:
+        grados = recepcion_distancia_grados
+        direccion = recepcion_distancia_direccion
+        velocidad = recepcion_distancia_velocidad
+        recepcion_distancia_estado = 0
+        iniciar_movimiento_distancia(direccion, velocidad, grados)
+        return {"modo": "distancia_ejecutando", "grados": grados, "velocidad": velocidad}
+
+    return {"modo": "distancia_dato", "bloque": recepcion_distancia_bloques}
+
+
 def aplicar_seguridad_desconexion():
-    """Detiene actuadores cuando IdeaBoard deja de estar disponible."""
     detener_ruedas()
     detener_garra()
-
     if pala_en_movimiento:
         try:
             enviar_mantener_posicion_pala()
         except Exception:
             detener_pala_totalmente()
+    cancelar_movimiento_distancia()
 
 
 # ==========================================================
@@ -402,23 +697,34 @@ def aplicar_accesorios(direccion, indice_garra, indice_pala):
 
 
 def aplicar_byte(byte):
-    # Si el comando anterior movia la pala, este nuevo byte marca su final.
-    finalizar_movimiento_pala_si_corresponde()
+    resultado_control = procesar_control_distancia(byte)
 
+    if resultado_control is not None:
+        return resultado_control
+
+    finalizar_movimiento_pala_si_corresponde()
     modo, direccion, campo_1, campo_2 = decodificar_campos(byte)
 
-    if modo == MODO_RUEDAS:
-        return aplicar_ruedas(
+    if movimiento_distancia_activo and modo == MODO_RUEDAS:
+        resultado_distancia = actualizar_correccion_movimiento_distancia(
             direccion,
             campo_1,
             campo_2
         )
 
-    return aplicar_accesorios(
-        direccion,
-        campo_1,
-        campo_2
-    )
+        if resultado_distancia is not None:
+            return resultado_distancia
+
+    # Cualquier orden incompatible cancela primero el movimiento por
+    # distancia y luego se procesa normalmente.
+    if movimiento_distancia_activo:
+        cancelar_movimiento_distancia()
+
+    if modo == MODO_RUEDAS:
+        return aplicar_ruedas(direccion, campo_1, campo_2)
+
+    return aplicar_accesorios(direccion, campo_1, campo_2)
+
 
 
 # ==========================================================
@@ -427,11 +733,11 @@ def aplicar_byte(byte):
 
 
 print("Esperando comandos LPF2 de 8 bits por el puerto D...")
-
 detener_todo()
 
 while True:
     try:
+        actualizar_movimiento_distancia()
         datos = device.data(PUERTO_IDEABOARD)
         valor_firmado = extraer_valor(datos)
 
@@ -439,11 +745,8 @@ while True:
             seguridad_desconexion_aplicada = False
             byte = convertir_a_byte(valor_firmado)
 
-            # IdeaBoard repite el byte durante el movimiento. Solamente un
-            # byte diferente representa una nueva orden.
             if byte != ultimo_byte:
                 resultado = aplicar_byte(byte)
-
                 if MOSTRAR_DIAGNOSTICO:
                     print(
                         "Recibido:", valor_firmado,
@@ -451,29 +754,21 @@ while True:
                         "| Bin:", byte_a_binario(byte),
                         "|", resultado
                     )
-
                 ultimo_byte = byte
 
     except Exception as error:
-        # Ante ENODEV tambien se detienen las ruedas. La version anterior
-        # conservaba el ultimo comando y el robot podia seguir girando.
         ultimo_byte = None
-
         errno = getattr(error, "errno", None)
         es_enodev = errno == 19 or "ENODEV" in str(error)
 
         if not seguridad_desconexion_aplicada:
             aplicar_seguridad_desconexion()
             seguridad_desconexion_aplicada = True
-
             if es_enodev:
                 print("IdeaBoard desconectada. Motores en estado seguro.")
             else:
                 print("Error de comunicacion o decodificacion:", error)
 
-        # Conservar la ventana requerida por el handshake:
-        # 100 ms aqui + 20 ms al final = aproximadamente 120 ms.
         time.sleep(0.10)
 
-    # No reducir esta pausa durante la etapa de handshake.
     time.sleep(0.02)

@@ -27,11 +27,9 @@ CODIGO_GIRO_SOBRE_EJE = 7
 MENSAJE_DETENER = 3
 mensaje_actual = MENSAJE_DETENER
 keys = keypad.Keys((board.IO0,), value_when_pressed=False, pull=True)
-
 def boton_presionado():
  evento = keys.events.get()
  return bool(evento and evento.released)
-
 def limpiar_eventos_boton():
  while keys.events.get() is not None:
   pass
@@ -51,6 +49,15 @@ i2c = board.I2C()
 imu = LSM6DS3TRC(i2c, address=106)
 offset_giroscopio_z = None
 VELOCIDAD_BASE = 20
+CIRCUNFERENCIA_RUEDA_CM = 17.6
+CONTROL_DISTANCIA_INICIO = 255
+CONTROL_DISTANCIA_PAUSA = 247
+CONTROL_DISTANCIA_REANUDAR = 239
+CONTROL_DISTANCIA_CANCELAR = 231
+TIEMPO_PAQUETE_DISTANCIA = 0.1
+MAX_GRADOS_DISTANCIA = (1 << 18) - 1
+FACTOR_ESPERA_DISTANCIA = 1.35
+MARGEN_ESPERA_DISTANCIA = 0.6
 CORRECCION_MAXIMA = 3
 KP_CORRECCION = 1.0
 ERROR_RUMBO_MINIMO = 0.2
@@ -60,7 +67,7 @@ SIGNO_CORRECCION = 1
 MOSTRAR_DIAGNOSTICO_CONTROL = False
 INTERVALO_DIAGNOSTICO = 1.0
 TOLERANCIA_ANGULO_GIRO = 1.5
-VELOCIDAD_ANGULAR_DETENIDA = 1.0
+VELOCIDAD_ANGULAR_DETENIDA = 3.0
 TIEMPO_ESTABLE_GIRO = 0.1
 TIEMPO_MAXIMO_GIRO_90 = 8.0
 MOSTRAR_DIAGNOSTICO_GIRO = False
@@ -81,23 +88,20 @@ COLOR_INTERSECCION_IZQUIERDA = (255, 0, 255)
 COLOR_INTERSECCION_T = (255, 0, 0)
 COLOR_ERROR = (255, 0, 0)
 COLOR_APAGADO = (0, 0, 0)
-
+COLOR_PAUSA = (255, 255, 0)
 def limitar(valor, minimo, maximo):
  return max(minimo, min(valor, maximo))
-
 def normalizar_angulo(angulo):
  while angulo > 180:
   angulo -= 360
  while angulo < -180:
   angulo += 360
  return angulo
-
 def validar_segundos(segundos):
  if not isinstance(segundos, (int, float)):
   raise ValueError('segundos debe ser numerico')
  if segundos < 0:
   raise ValueError('Los segundos no pueden ser negativos')
-
 def validar_velocidad(velocidad, nombre='velocidad'):
  if not isinstance(velocidad, int):
   raise ValueError(nombre + ' debe ser un numero entero')
@@ -105,20 +109,17 @@ def validar_velocidad(velocidad, nombre='velocidad'):
   raise ValueError(nombre + ' debe estar entre 0 y 60')
  if velocidad % 10 != 0:
   raise ValueError(nombre + ' debe ser multiplo de 10')
-
 def validar_correccion(correccion):
  if not isinstance(correccion, int):
   raise ValueError('La correccion debe ser un numero entero')
  if correccion < -3 or correccion > 3:
   raise ValueError('La correccion debe estar entre -3 y 3')
-
 def cuantizar_correccion(correccion):
  correccion = limitar(float(correccion), -3.0, 3.0)
  magnitud = int(math.floor(abs(correccion) + 0.5))
  if correccion < 0:
   magnitud = -magnitud
  return int(limitar(magnitud, -3, 3))
-
 def convertir_direccion(direccion):
  if direccion == DIRECCION_ADELANTE:
   return DIRECCION_ADELANTE
@@ -131,7 +132,6 @@ def convertir_direccion(direccion):
   if direccion in ('atras', 'atrás', 'reversa', 'bajar', 'cerrar'):
    return DIRECCION_ATRAS
  raise ValueError("direccion debe ser 'adelante' o 'atras'")
-
 def convertir_direccion_giro(direccion):
  if not isinstance(direccion, str):
   raise ValueError('direccion de giro debe ser texto')
@@ -141,12 +141,10 @@ def convertir_direccion_giro(direccion):
  if direccion == 'derecha':
   return DIRECCION_ADELANTE
  raise ValueError("direccion debe ser 'izquierda' o 'derecha'")
-
 def direccion_giro_opuesta(direccion):
  if direccion == 'izquierda':
   return 'derecha'
  return 'izquierda'
-
 def codificar_ruedas(velocidad_base, correccion=0, direccion='adelante'):
  validar_velocidad(velocidad_base, 'velocidad_base')
  validar_correccion(correccion)
@@ -154,7 +152,6 @@ def codificar_ruedas(velocidad_base, correccion=0, direccion='adelante'):
  indice_velocidad = velocidad_base // 10
  indice_correccion = correccion + 3
  return MODO_RUEDAS << 7 | bit_direccion << 6 | indice_velocidad << 3 | indice_correccion
-
 def codificar_giro(direccion, velocidad_base):
  validar_velocidad(velocidad_base, 'velocidad_base')
  if velocidad_base == 0:
@@ -162,7 +159,6 @@ def codificar_giro(direccion, velocidad_base):
  bit_direccion = convertir_direccion_giro(direccion)
  indice_velocidad = velocidad_base // 10
  return MODO_RUEDAS << 7 | bit_direccion << 6 | indice_velocidad << 3 | CODIGO_GIRO_SOBRE_EJE
-
 def codificar_accesorios(velocidad_garra, velocidad_pala, direccion='adelante'):
  validar_velocidad(velocidad_garra, 'velocidad_garra')
  validar_velocidad(velocidad_pala, 'velocidad_pala')
@@ -170,37 +166,28 @@ def codificar_accesorios(velocidad_garra, velocidad_pala, direccion='adelante'):
  indice_garra = velocidad_garra // 10
  indice_pala = velocidad_pala // 10
  return MODO_ACCESORIOS << 7 | bit_direccion << 6 | indice_garra << 3 | indice_pala
-
 def establecer_mensaje(mensaje):
  global mensaje_actual
  if not isinstance(mensaje, int) or mensaje < 0 or mensaje > 255:
   raise ValueError('El mensaje debe ser un byte entre 0 y 255')
  mensaje_actual = mensaje
-
 def establecer_ruedas(velocidad_base, correccion=0, direccion='adelante'):
  establecer_mensaje(codificar_ruedas(velocidad_base, correccion, direccion))
-
 def establecer_giro(direccion, velocidad_base):
  establecer_mensaje(codificar_giro(direccion, velocidad_base))
-
 def establecer_accesorios(velocidad_garra, velocidad_pala, direccion='adelante'):
  establecer_mensaje(codificar_accesorios(velocidad_garra, velocidad_pala, direccion))
-
 def establecer_parada_global():
  establecer_mensaje(MENSAJE_DETENER)
-
 def interseccion_derecha():
  ib.pixel = COLOR_INTERSECCION_DERECHA
  print('Interseccion solamente hacia la derecha.')
-
 def interseccion_izquierda():
  ib.pixel = COLOR_INTERSECCION_IZQUIERDA
  print('Interseccion solamente hacia la izquierda.')
-
 def interseccion_T():
  ib.pixel = COLOR_INTERSECCION_T
  print('Interseccion tipo T.')
-
 def indicar_tipo_interseccion(tipo):
  if tipo == 'derecha':
   interseccion_derecha()
@@ -210,28 +197,23 @@ def indicar_tipo_interseccion(tipo):
   interseccion_T()
  else:
   ib.pixel = COLOR_ERROR
-
 def checksum(data):
  c = 255
  for b in data:
   c ^= b
  return c & 255
-
 def open_uart(baud):
  global uart
  if uart:
   uart.deinit()
  uart = busio.UART(tx=TX_PIN, rx=RX_PIN, baudrate=baud, timeout=0.005, receiver_buffer_size=64)
  time.sleep(0.05)
-
 def send_raw(data):
  uart.write(bytes(data))
-
 def send_msg(data):
  paquete = bytearray(data)
  paquete.append(checksum(paquete))
  send_raw(paquete)
-
 def wait_for_hub_idle():
  global uart
  if uart:
@@ -255,7 +237,6 @@ def wait_for_hub_idle():
  time.sleep(0.1)
  rx.deinit()
  tx.deinit()
-
 def send_init_sequence():
  open_uart(BAUD_INICIAL)
  send_raw([0])
@@ -274,7 +255,6 @@ def send_init_sequence():
  send_msg([144, 128, 1, 0, 3, 0])
  send_raw([4])
  time.sleep(0.005)
-
 def wait_for_ack():
  start = time.monotonic()
  while time.monotonic() - start < 2.0:
@@ -285,12 +265,10 @@ def wait_for_ack():
     return True
   time.sleep(0.005)
  return False
-
 def send_control_data():
  paquete = bytearray([192, mensaje_actual & 255])
  paquete.append(checksum(paquete))
  send_raw(paquete)
-
 def procesar_comunicacion():
  global connected
  global last_nack
@@ -309,21 +287,46 @@ def procesar_comunicacion():
   print('Timeout NACK real. Se perdio el enlace LPF2.')
   connected = False
  return connected
-
 def mantener_comunicacion(segundos):
  fin = time.monotonic() + segundos
  while connected and time.monotonic() < fin:
   procesar_comunicacion()
   time.sleep(0.001)
  return connected
-
+def gestionar_pausa(color_reanudar):
+ if not boton_presionado():
+  return 0.0
+ mensaje_reanudar = mensaje_actual
+ inicio_pausa = time.monotonic()
+ establecer_parada_global()
+ ib.pixel = COLOR_PAUSA
+ print('Programa pausado. Presione BOOT para continuar.')
+ while connected:
+  if not procesar_comunicacion():
+   raise RuntimeError('Se perdio el enlace durante la pausa')
+  if boton_presionado():
+   establecer_mensaje(mensaje_reanudar)
+   ib.pixel = color_reanudar
+   print('Programa reanudado.')
+   return time.monotonic() - inicio_pausa
+  time.sleep(0.001)
+ raise RuntimeError('Se perdio el enlace durante la pausa')
+def esperar_con_pausa(segundos, color_reanudar):
+ fin = time.monotonic() + segundos
+ while connected and time.monotonic() < fin:
+  if not procesar_comunicacion():
+   return False
+  duracion_pausa = gestionar_pausa(color_reanudar)
+  if duracion_pausa > 0:
+   fin += duracion_pausa
+  time.sleep(0.001)
+ return connected
 def confirmar_parada(cambiar_color=True):
  establecer_parada_global()
  if cambiar_color:
   ib.pixel = COLOR_DETENERSE
  if not mantener_comunicacion(TIEMPO_CONFIRMACION_PARADA):
   raise RuntimeError('Se perdio el enlace al enviar la parada')
-
 def conectar_spike():
  global connected
  global last_nack
@@ -344,15 +347,12 @@ def conectar_spike():
  connected = True
  last_nack = time.monotonic()
  return True
-
 def leer_nivel_digital(sensor):
  return 1 if sensor.value else 0
-
 def nivel_es_negro(nivel):
  if SENSOR_NEGRO_ES_LOW:
   return nivel == 0
  return nivel == 1
-
 def leer_sensores_linea():
  nivel_ei = leer_nivel_digital(sensor_externo_izquierdo)
  nivel_ci = leer_nivel_digital(sensor_centro_izquierdo)
@@ -360,7 +360,6 @@ def leer_sensores_linea():
  nivel_cd = leer_nivel_digital(sensor_centro_derecho)
  nivel_ed = leer_nivel_digital(sensor_externo_derecho)
  return (nivel_ei, nivel_ci, nivel_c, nivel_cd, nivel_ed, nivel_es_negro(nivel_ei), nivel_es_negro(nivel_ci), nivel_es_negro(nivel_c), nivel_es_negro(nivel_cd), nivel_es_negro(nivel_ed))
-
 def correccion_desde_sensores(externo_izquierdo, centro_izquierdo, centro, centro_derecho, externo_derecho):
  if externo_izquierdo or externo_derecho:
   return None
@@ -369,7 +368,6 @@ def correccion_desde_sensores(externo_izquierdo, centro_izquierdo, centro, centr
  if centro_izquierdo and (not centro_derecho):
   return CORRECCION_LINEA * SIGNO_CORRECCION_LINEA
  return None
-
 def calibrar_giroscopio(cantidad_muestras=40):
  global offset_giroscopio_z
  if cantidad_muestras <= 0:
@@ -387,7 +385,6 @@ def calibrar_giroscopio(cantidad_muestras=40):
  offset_giroscopio_z = suma_z / cantidad_muestras
  print('Offset Z:', offset_giroscopio_z, 'grados/s')
  return offset_giroscopio_z
-
 def actualizar_rumbo(rumbo_actual, tiempo_anterior):
  if offset_giroscopio_z is None:
   raise RuntimeError('El giroscopio no ha sido calibrado')
@@ -404,7 +401,6 @@ def actualizar_rumbo(rumbo_actual, tiempo_anterior):
  rumbo_actual += velocidad_angular_z * dt
  rumbo_actual = normalizar_angulo(rumbo_actual)
  return (rumbo_actual, tiempo_actual, velocidad_angular_z)
-
 def calcular_correccion_giroscopio(rumbo_actual, rumbo_objetivo):
  error_rumbo = normalizar_angulo(rumbo_objetivo - rumbo_actual)
  if abs(error_rumbo) < ERROR_RUMBO_MINIMO:
@@ -414,13 +410,11 @@ def calcular_correccion_giroscopio(rumbo_actual, rumbo_objetivo):
  if correccion == 0:
   correccion = 2 if correccion_continua > 0 else -2
  return (correccion, error_rumbo)
-
 def convertir_correccion_a_direccion(correccion_logica, direccion_movimiento):
  bit_direccion = convertir_direccion(direccion_movimiento)
  if bit_direccion == DIRECCION_ATRAS:
   return -correccion_logica
  return correccion_logica
-
 def aplicar_control_rumbo(rumbo_actual, rumbo_objetivo, velocidad_base, direccion_movimiento, tiempo_anterior, correccion_infrarroja=None):
  rumbo_actual, tiempo_actual, velocidad_angular_z = actualizar_rumbo(rumbo_actual, tiempo_anterior)
  correccion_gyro, error_rumbo = calcular_correccion_giroscopio(rumbo_actual, rumbo_objetivo)
@@ -433,7 +427,6 @@ def aplicar_control_rumbo(rumbo_actual, rumbo_objetivo, velocidad_base, direccio
  correccion_enviada = convertir_correccion_a_direccion(correccion_logica, direccion_movimiento)
  establecer_ruedas(velocidad_base, correccion_enviada, direccion=direccion_movimiento)
  return (rumbo_actual, tiempo_actual, correccion_logica, correccion_enviada, error_rumbo, velocidad_angular_z, fuente)
-
 def _mover_tiempo_con_giroscopio(segundos, velocidad_base, direccion_movimiento, color_led):
  validar_segundos(segundos)
  validar_velocidad(velocidad_base, 'velocidad_base')
@@ -452,6 +445,11 @@ def _mover_tiempo_con_giroscopio(segundos, velocidad_base, direccion_movimiento,
   while connected and time.monotonic() < fin:
    if not procesar_comunicacion():
     raise RuntimeError('Se perdio el enlace durante el movimiento')
+   duracion_pausa = gestionar_pausa(color_led)
+   if duracion_pausa > 0:
+    fin += duracion_pausa
+    tiempo_anterior = time.monotonic()
+    continue
    rumbo_actual, tiempo_anterior, _, _, _, _, _ = aplicar_control_rumbo(rumbo_actual, rumbo_objetivo, velocidad_base, direccion_movimiento, tiempo_anterior, correccion_infrarroja=None)
    if not procesar_comunicacion():
     raise RuntimeError('Se perdio el enlace durante el movimiento')
@@ -462,38 +460,124 @@ def _mover_tiempo_con_giroscopio(segundos, velocidad_base, direccion_movimiento,
    mantener_comunicacion(TIEMPO_CONFIRMACION_PARADA)
   raise
  confirmar_parada(cambiar_color=True)
-
 def avance(segundos, velocidad):
  _mover_tiempo_con_giroscopio(segundos, velocidad, DIRECCION_ADELANTE, COLOR_AVANCE)
-
 def reversa(segundos, velocidad):
  _mover_tiempo_con_giroscopio(segundos, velocidad, DIRECCION_ATRAS, COLOR_REVERSA)
-
 def detenerse(segundos):
  validar_segundos(segundos)
  establecer_parada_global()
  ib.pixel = COLOR_DETENERSE
- if not mantener_comunicacion(segundos):
+ if not esperar_con_pausa(segundos, COLOR_DETENERSE):
   raise RuntimeError('Se perdio el enlace durante detenerse()')
-
+def validar_distancia_cm(distancia_cm):
+ if not isinstance(distancia_cm, (int, float)):
+  raise ValueError('distancia_cm debe ser numerica')
+ if distancia_cm <= 0:
+  raise ValueError('distancia_cm debe ser mayor que cero')
+ if CIRCUNFERENCIA_RUEDA_CM <= 0:
+  raise ValueError('CIRCUNFERENCIA_RUEDA_CM debe ser mayor que cero')
+def _paquete_control_distancia(nibble):
+ return 128 | (nibble & 15) << 3 | 7
+def _crear_paquetes_distancia(direccion, velocidad, grados_objetivo):
+ bit_direccion = convertir_direccion(direccion)
+ indice_velocidad = velocidad // 10
+ metadata = bit_direccion << 3 | indice_velocidad
+ paquetes = [CONTROL_DISTANCIA_INICIO, _paquete_control_distancia(metadata)]
+ toggle = 1 - bit_direccion
+ for desplazamiento in (15, 12, 9, 6, 3, 0):
+  bloque = grados_objetivo >> desplazamiento & 7
+  nibble = toggle << 3 | bloque
+  paquetes.append(_paquete_control_distancia(nibble))
+  toggle = 1 - toggle
+ return paquetes
+def _enviar_control_distancia(paquete):
+ establecer_mensaje(paquete)
+ if not mantener_comunicacion(TIEMPO_PAQUETE_DISTANCIA):
+  raise RuntimeError('Se perdio el enlace enviando distancia')
+def _pausar_movimiento_distancia(color_reanudar):
+ if not boton_presionado():
+  return 0.0
+ inicio = time.monotonic()
+ _enviar_control_distancia(CONTROL_DISTANCIA_PAUSA)
+ ib.pixel = COLOR_PAUSA
+ print('Movimiento por distancia pausado.')
+ while connected:
+  if not procesar_comunicacion():
+   raise RuntimeError('Se perdio el enlace durante la pausa')
+  if boton_presionado():
+   _enviar_control_distancia(CONTROL_DISTANCIA_REANUDAR)
+   ib.pixel = color_reanudar
+   print('Movimiento por distancia reanudado.')
+   return time.monotonic() - inicio
+  time.sleep(0.001)
+ raise RuntimeError('Se perdio el enlace durante la pausa')
+def _mover_distancia(distancia_cm, velocidad, direccion, color_led):
+ validar_distancia_cm(distancia_cm)
+ validar_velocidad(velocidad, 'velocidad')
+ if velocidad == 0:
+  raise ValueError('velocidad debe ser al menos 10')
+ if offset_giroscopio_z is None:
+  raise RuntimeError('El giroscopio no ha sido calibrado')
+ rotaciones = distancia_cm / CIRCUNFERENCIA_RUEDA_CM
+ grados_objetivo = int(round(rotaciones * 360.0))
+ if grados_objetivo <= 0 or grados_objetivo > MAX_GRADOS_DISTANCIA:
+  raise ValueError('La distancia solicitada excede el rango permitido')
+ ib.pixel = color_led
+ paquetes = _crear_paquetes_distancia(direccion, velocidad, grados_objetivo)
+ rumbo_actual = 0.0
+ rumbo_objetivo = 0.0
+ tiempo_anterior = time.monotonic()
+ print('Movimiento por distancia:', distancia_cm, 'cm', '| Rotaciones:', round(rotaciones, 3), '| Grados de motor:', grados_objetivo, '| Velocidad:', velocidad, '| Control: encoders + giroscopio')
+ try:
+  for paquete in paquetes:
+   _enviar_control_distancia(paquete)
+  establecer_ruedas(velocidad, 0, direccion=direccion)
+  velocidad_minima = max(1, velocidad - CORRECCION_MAXIMA)
+  segundos_estimados = grados_objetivo / float(velocidad_minima * 10)
+  fin = time.monotonic() + segundos_estimados * FACTOR_ESPERA_DISTANCIA + MARGEN_ESPERA_DISTANCIA
+  while connected and time.monotonic() < fin:
+   if not procesar_comunicacion():
+    raise RuntimeError('Se perdio el enlace durante movimiento por distancia')
+   pausa = _pausar_movimiento_distancia(color_led)
+   if pausa > 0:
+    fin += pausa
+    tiempo_anterior = time.monotonic()
+    continue
+   rumbo_actual, tiempo_anterior, correccion_logica, correccion_enviada, error_rumbo, velocidad_angular_z, _ = aplicar_control_rumbo(rumbo_actual, rumbo_objetivo, velocidad, direccion, tiempo_anterior, correccion_infrarroja=None)
+   if MOSTRAR_DIAGNOSTICO_CONTROL:
+    print('Distancia + gyro', '| Rumbo:', round(rumbo_actual, 2), '| Error:', round(error_rumbo, 2), '| Correccion:', correccion_enviada, '| Velocidad angular:', round(velocidad_angular_z, 2))
+   if not procesar_comunicacion():
+    raise RuntimeError('Se perdio el enlace durante movimiento por distancia')
+   time.sleep(0.001)
+ except Exception:
+  try:
+   _enviar_control_distancia(CONTROL_DISTANCIA_CANCELAR)
+  except Exception:
+   pass
+  establecer_parada_global()
+  if connected:
+   mantener_comunicacion(TIEMPO_CONFIRMACION_PARADA)
+  raise
+ confirmar_parada(cambiar_color=True)
+def avance_distancia(distancia_cm, velocidad=VELOCIDAD_BASE):
+ _mover_distancia(distancia_cm, velocidad, DIRECCION_ADELANTE, COLOR_AVANCE)
+def reversa_distancia(distancia_cm, velocidad=VELOCIDAD_BASE):
+ _mover_distancia(distancia_cm, velocidad, DIRECCION_ATRAS, COLOR_REVERSA)
 def ejecutar_accesorios(segundos, velocidad_garra, velocidad_pala, direccion='adelante', color_led=COLOR_GARRA_PALA):
  validar_segundos(segundos)
  establecer_accesorios(velocidad_garra, velocidad_pala, direccion)
  ib.pixel = color_led
- if not mantener_comunicacion(segundos):
+ if not esperar_con_pausa(segundos, color_led):
   establecer_parada_global()
   raise RuntimeError('Se perdio el enlace durante accesorios')
  confirmar_parada(cambiar_color=True)
-
 def mover_garra(segundos, velocidad, direccion='adelante'):
  ejecutar_accesorios(segundos, velocidad_garra=velocidad, velocidad_pala=0, direccion=direccion, color_led=COLOR_GARRA)
-
 def mover_pala(segundos, velocidad, direccion='adelante'):
  ejecutar_accesorios(segundos, velocidad_garra=0, velocidad_pala=velocidad, direccion=direccion, color_led=COLOR_PALA)
-
 def mover_garra_pala(segundos, velocidad_garra, velocidad_pala, direccion='adelante'):
  ejecutar_accesorios(segundos, velocidad_garra, velocidad_pala, direccion, color_led=COLOR_GARRA_PALA)
-
 def calcular_velocidad_giro(error_angulo, velocidad_base):
  error_angulo = abs(error_angulo)
  if error_angulo > 35:
@@ -501,7 +585,6 @@ def calcular_velocidad_giro(error_angulo, velocidad_base):
  if error_angulo > 15:
   return min(velocidad_base, 20)
  return 10
-
 def girar(direccion, angulo, velocidad_base):
  if offset_giroscopio_z is None:
   raise RuntimeError('El giroscopio no ha sido calibrado')
@@ -532,6 +615,12 @@ def girar(direccion, angulo, velocidad_base):
   while True:
    if not procesar_comunicacion():
     raise RuntimeError('Se perdio el enlace durante girar()')
+   duracion_pausa = gestionar_pausa(COLOR_GIRO)
+   if duracion_pausa > 0:
+    tiempo_inicio += duracion_pausa
+    tiempo_anterior = time.monotonic()
+    tiempo_estable = None
+    continue
    tiempo_actual = time.monotonic()
    dt = tiempo_actual - tiempo_anterior
    tiempo_anterior = tiempo_actual
@@ -540,7 +629,10 @@ def girar(direccion, angulo, velocidad_base):
    if abs(velocidad_angular_z) < ZONA_MUERTA_GIRO:
     velocidad_angular_z = 0.0
    if 0 < dt <= 0.1:
-    incremento = abs(velocidad_angular_z) * dt
+    if comando_detenido and abs(velocidad_angular_z) <= VELOCIDAD_ANGULAR_DETENIDA:
+     incremento = 0.0
+    else:
+     incremento = abs(velocidad_angular_z) * dt
     if direccion_actual == direccion:
      angulo_medido += incremento
     else:
@@ -588,7 +680,6 @@ def girar(direccion, angulo, velocidad_base):
  confirmar_parada(cambiar_color=True)
  print('Giro terminado', '| Objetivo:', angulo, '| Medido:', round(angulo_medido, 2))
  return angulo_medido
-
 def clasificar_interseccion(externo_izquierdo_visto, externo_derecho_visto):
  if externo_izquierdo_visto and externo_derecho_visto:
   return 'T'
@@ -597,7 +688,6 @@ def clasificar_interseccion(externo_izquierdo_visto, externo_derecho_visto):
  if externo_derecho_visto:
   return 'derecha'
  return 'desconocida'
-
 def _mover_hasta_interseccion(numero_interseccion, velocidad_base, direccion_movimiento):
  if not isinstance(numero_interseccion, int):
   raise ValueError('numero_interseccion debe ser entero')
@@ -606,13 +696,10 @@ def _mover_hasta_interseccion(numero_interseccion, velocidad_base, direccion_mov
  validar_velocidad(velocidad_base, 'velocidad_base')
  if velocidad_base == 0:
   raise ValueError('velocidad_base debe ser al menos 10')
- if offset_giroscopio_z is None:
-  raise RuntimeError('El giroscopio no ha sido calibrado')
  bit_direccion = convertir_direccion(direccion_movimiento)
  es_reversa = bit_direccion == DIRECCION_ATRAS
- rumbo_actual = 0.0
- rumbo_objetivo = 0.0
- tiempo_anterior = time.monotonic()
+ color_movimiento = COLOR_REVERSA_HASTA if es_reversa else COLOR_AVANCE_HASTA
+ texto_movimiento = 'Reversa' if es_reversa else 'Avance'
  ultimo_diagnostico_sensores = 0.0
  contador_intersecciones = 0
  tipo_interseccion = None
@@ -621,26 +708,21 @@ def _mover_hasta_interseccion(numero_interseccion, velocidad_base, direccion_mov
  interseccion_activa = False
  externo_derecho_visto = False
  externo_izquierdo_visto = False
- nivel_ei, nivel_ci, nivel_c, nivel_cd, nivel_ed, ext_izq, cen_izq, centro, cen_der, ext_der = leer_sensores_linea()
- interseccion_activa = False
- if es_reversa:
-  ib.pixel = COLOR_REVERSA_HASTA
-  texto_movimiento = 'Reversa'
- else:
-  ib.pixel = COLOR_AVANCE_HASTA
-  texto_movimiento = 'Avance'
+ ib.pixel = color_movimiento
  establecer_ruedas(velocidad_base, 0, direccion=bit_direccion)
- print(texto_movimiento, 'hasta la interseccion', numero_interseccion, '| Velocidad base:', velocidad_base)
+ print(texto_movimiento, 'hasta la interseccion', numero_interseccion, '| Velocidad base:', velocidad_base, '| Control: infrarrojos')
  try:
   while contador_intersecciones < numero_interseccion:
    if not procesar_comunicacion():
     raise RuntimeError('Se perdio la conexion durante ' + ('reversa_hasta()' if es_reversa else 'avance_hasta()'))
+   if gestionar_pausa(color_movimiento) > 0:
+    ultimo_diagnostico_sensores = time.monotonic()
+    continue
    nivel_ei, nivel_ci, nivel_c, nivel_cd, nivel_ed, ext_izq, cen_izq, centro, cen_der, ext_der = leer_sensores_linea()
    ahora = time.monotonic()
-   if MOSTRAR_DIAGNOSTICO_SENSORES:
-    if ahora - ultimo_diagnostico_sensores >= INTERVALO_DIAGNOSTICO_SENSORES:
-     print('Sensores: {}{}{}{}{} '.format(nivel_ei, nivel_ci, nivel_c, nivel_cd, nivel_ed).replace('0', '-').replace('1', '▤'))
-     ultimo_diagnostico_sensores = ahora
+   if MOSTRAR_DIAGNOSTICO_SENSORES and ahora - ultimo_diagnostico_sensores >= INTERVALO_DIAGNOSTICO_SENSORES:
+    print('Sensores: {}{}{}{}{} '.format(nivel_ei, nivel_ci, nivel_c, nivel_cd, nivel_ed).replace('0', '-').replace('1', '▤'))
+    ultimo_diagnostico_sensores = ahora
    interseccion_confirmada = False
    if interseccion_activa:
     if not ext_der and (not ext_izq):
@@ -651,7 +733,7 @@ def _mover_hasta_interseccion(numero_interseccion, velocidad_base, direccion_mov
       muestras_interseccion = 0
       externo_derecho_visto = False
       externo_izquierdo_visto = False
-      ib.pixel = COLOR_REVERSA_HASTA if es_reversa else COLOR_AVANCE_HASTA
+      ib.pixel = color_movimiento
     else:
      muestras_liberacion = 0
    elif ext_der or ext_izq:
@@ -667,7 +749,6 @@ def _mover_hasta_interseccion(numero_interseccion, velocidad_base, direccion_mov
      tipo_interseccion = clasificar_interseccion(externo_izquierdo_visto, externo_derecho_visto)
      indicar_tipo_interseccion(tipo_interseccion)
      print('Interseccion:', contador_intersecciones, '| Tipo:', tipo_interseccion, '| Movimiento:', 'reversa' if es_reversa else 'avance')
-     print('Sensores: {}{}{}{}{} '.format(nivel_ei, nivel_ci, nivel_c, nivel_cd, nivel_ed).replace('0', '-').replace('1', '▤'))
    else:
     muestras_interseccion = 0
     externo_derecho_visto = False
@@ -675,10 +756,11 @@ def _mover_hasta_interseccion(numero_interseccion, velocidad_base, direccion_mov
    if interseccion_confirmada and contador_intersecciones >= numero_interseccion:
     confirmar_parada(cambiar_color=False)
     return tipo_interseccion
-   correccion_ir = correccion_desde_sensores(ext_izq, cen_izq, centro, cen_der, ext_der)
-   rumbo_actual, tiempo_anterior, correccion_logica, correccion_enviada, error_rumbo, velocidad_angular_z, fuente = aplicar_control_rumbo(rumbo_actual, rumbo_objetivo, velocidad_base, bit_direccion, tiempo_anterior, correccion_infrarroja=correccion_ir)
-   if MOSTRAR_DIAGNOSTICO_CONTROL:
-    print('Fuente:', fuente, '| Error gyro:', round(error_rumbo, 2), '| Correccion logica:', correccion_logica, '| Correccion enviada:', correccion_enviada)
+   correccion_logica = correccion_desde_sensores(ext_izq, cen_izq, centro, cen_der, ext_der)
+   if correccion_logica is None:
+    correccion_logica = 0
+   correccion_enviada = convertir_correccion_a_direccion(correccion_logica, bit_direccion)
+   establecer_ruedas(velocidad_base, correccion_enviada, direccion=bit_direccion)
    if not procesar_comunicacion():
     raise RuntimeError('Se perdio la conexion durante ' + ('reversa_hasta()' if es_reversa else 'avance_hasta()'))
    time.sleep(0.001)
@@ -689,13 +771,10 @@ def _mover_hasta_interseccion(numero_interseccion, velocidad_base, direccion_mov
   raise
  confirmar_parada(cambiar_color=False)
  return tipo_interseccion
-
 def avance_hasta(numero_interseccion, velocidad_base=VELOCIDAD_BASE):
  return _mover_hasta_interseccion(numero_interseccion, velocidad_base, DIRECCION_ADELANTE)
-
 def reversa_hasta(numero_interseccion, velocidad_base=VELOCIDAD_BASE):
  return _mover_hasta_interseccion(numero_interseccion, velocidad_base, DIRECCION_ATRAS)
-
 def esperar_boton_inicio():
  establecer_parada_global()
  limpiar_eventos_boton()
@@ -711,8 +790,7 @@ def esperar_boton_inicio():
    return True
   time.sleep(0.001)
  return False
-__all__ = ('avance', 'reversa', 'detenerse', 'girar', 'avance_hasta', 'reversa_hasta', 'mover_garra', 'mover_pala', 'mover_garra_pala', 'calibrar_giroscopio', 'iniciar')
-
+__all__ = ('avance', 'reversa', 'detenerse', 'girar', 'avance_hasta', 'reversa_hasta', 'avance_distancia', 'reversa_distancia', 'mover_garra', 'mover_pala', 'mover_garra_pala', 'calibrar_giroscopio', 'iniciar')
 def iniciar(programa_usuario):
  global connected
  print('Iniciando biblioteca LPF2: ruedas, garra, pala y 5 sensores...')
