@@ -60,7 +60,7 @@ SIGNO_CORRECCION = 1
 MOSTRAR_DIAGNOSTICO_CONTROL = False
 INTERVALO_DIAGNOSTICO = 1.0
 TOLERANCIA_ANGULO_GIRO = 1.5
-VELOCIDAD_ANGULAR_DETENIDA = 3.0
+VELOCIDAD_ANGULAR_DETENIDA = 1.0
 TIEMPO_ESTABLE_GIRO = 0.1
 TIEMPO_MAXIMO_GIRO_90 = 8.0
 MOSTRAR_DIAGNOSTICO_GIRO = False
@@ -81,7 +81,6 @@ COLOR_INTERSECCION_IZQUIERDA = (255, 0, 255)
 COLOR_INTERSECCION_T = (255, 0, 0)
 COLOR_ERROR = (255, 0, 0)
 COLOR_APAGADO = (0, 0, 0)
-COLOR_PAUSA = (255, 255, 0)
 
 def limitar(valor, minimo, maximo):
  return max(minimo, min(valor, maximo))
@@ -138,9 +137,9 @@ def convertir_direccion_giro(direccion):
   raise ValueError('direccion de giro debe ser texto')
  direccion = direccion.strip().lower()
  if direccion == 'izquierda':
-  return DIRECCION_ADELANTE
- if direccion == 'derecha':
   return DIRECCION_ATRAS
+ if direccion == 'derecha':
+  return DIRECCION_ADELANTE
  raise ValueError("direccion debe ser 'izquierda' o 'derecha'")
 
 def direccion_giro_opuesta(direccion):
@@ -312,31 +311,11 @@ def procesar_comunicacion():
  return connected
 
 def mantener_comunicacion(segundos):
- fin=time.monotonic()+segundos
- while connected and time.monotonic()<fin:
-  procesar_comunicacion();time.sleep(.001)
+ fin = time.monotonic() + segundos
+ while connected and time.monotonic() < fin:
+  procesar_comunicacion()
+  time.sleep(0.001)
  return connected
-
-def gestionar_pausa(color_reanudar):
- if not boton_presionado():return 0.0
- mensaje_reanudar=mensaje_actual;inicio_pausa=time.monotonic();establecer_parada_global();ib.pixel=COLOR_PAUSA
- print('Programa pausado.');print('Presione y suelte BOOT para continuar.')
- while connected:
-  if not procesar_comunicacion():raise RuntimeError('Se perdio el enlace durante la pausa')
-  if boton_presionado():
-   establecer_mensaje(mensaje_reanudar);ib.pixel=color_reanudar;print('Programa reanudado.');return time.monotonic()-inicio_pausa
-  time.sleep(.001)
- raise RuntimeError('Se perdio el enlace durante la pausa')
-
-def esperar_con_pausa(segundos,color_reanudar):
- fin=time.monotonic()+segundos
- while connected and time.monotonic()<fin:
-  if not procesar_comunicacion():return False
-  pausa=gestionar_pausa(color_reanudar)
-  if pausa>0:fin+=pausa
-  time.sleep(.001)
- return connected
-
 
 def confirmar_parada(cambiar_color=True):
  establecer_parada_global()
@@ -455,26 +434,34 @@ def aplicar_control_rumbo(rumbo_actual, rumbo_objetivo, velocidad_base, direccio
  establecer_ruedas(velocidad_base, correccion_enviada, direccion=direccion_movimiento)
  return (rumbo_actual, tiempo_actual, correccion_logica, correccion_enviada, error_rumbo, velocidad_angular_z, fuente)
 
-def _mover_tiempo_con_giroscopio(segundos,velocidad_base,direccion_movimiento,color_led):
- validar_segundos(segundos);validar_velocidad(velocidad_base,'velocidad_base')
- if velocidad_base==0:detenerse(segundos);return
- if offset_giroscopio_z is None:raise RuntimeError('El giroscopio no ha sido calibrado')
- ib.pixel=color_led;rumbo_actual=0.0;rumbo_objetivo=0.0;tiempo_anterior=time.monotonic();fin=tiempo_anterior+segundos
- establecer_ruedas(velocidad_base,0,direccion=direccion_movimiento)
+def _mover_tiempo_con_giroscopio(segundos, velocidad_base, direccion_movimiento, color_led):
+ validar_segundos(segundos)
+ validar_velocidad(velocidad_base, 'velocidad_base')
+ if velocidad_base == 0:
+  detenerse(segundos)
+  return
+ if offset_giroscopio_z is None:
+  raise RuntimeError('El giroscopio no ha sido calibrado')
+ ib.pixel = color_led
+ rumbo_actual = 0.0
+ rumbo_objetivo = 0.0
+ tiempo_anterior = time.monotonic()
+ fin = tiempo_anterior + segundos
+ establecer_ruedas(velocidad_base, 0, direccion=direccion_movimiento)
  try:
-  while connected and time.monotonic()<fin:
-   if not procesar_comunicacion():raise RuntimeError('Se perdio el enlace durante el movimiento')
-   pausa=gestionar_pausa(color_led)
-   if pausa>0:fin+=pausa;tiempo_anterior=time.monotonic();continue
-   rumbo_actual,tiempo_anterior,_,_,_,_,_=aplicar_control_rumbo(rumbo_actual,rumbo_objetivo,velocidad_base,direccion_movimiento,tiempo_anterior,correccion_infrarroja=None)
-   if not procesar_comunicacion():raise RuntimeError('Se perdio el enlace durante el movimiento')
-   time.sleep(.001)
+  while connected and time.monotonic() < fin:
+   if not procesar_comunicacion():
+    raise RuntimeError('Se perdio el enlace durante el movimiento')
+   rumbo_actual, tiempo_anterior, _, _, _, _, _ = aplicar_control_rumbo(rumbo_actual, rumbo_objetivo, velocidad_base, direccion_movimiento, tiempo_anterior, correccion_infrarroja=None)
+   if not procesar_comunicacion():
+    raise RuntimeError('Se perdio el enlace durante el movimiento')
+   time.sleep(0.001)
  except Exception:
   establecer_parada_global()
-  if connected:mantener_comunicacion(TIEMPO_CONFIRMACION_PARADA)
+  if connected:
+   mantener_comunicacion(TIEMPO_CONFIRMACION_PARADA)
   raise
  confirmar_parada(cambiar_color=True)
-
 
 def avance(segundos, velocidad):
  _mover_tiempo_con_giroscopio(segundos, velocidad, DIRECCION_ADELANTE, COLOR_AVANCE)
@@ -483,15 +470,20 @@ def reversa(segundos, velocidad):
  _mover_tiempo_con_giroscopio(segundos, velocidad, DIRECCION_ATRAS, COLOR_REVERSA)
 
 def detenerse(segundos):
- validar_segundos(segundos);establecer_parada_global();ib.pixel=COLOR_DETENERSE
- if not esperar_con_pausa(segundos,COLOR_DETENERSE):raise RuntimeError('Se perdio el enlace durante detenerse()')
+ validar_segundos(segundos)
+ establecer_parada_global()
+ ib.pixel = COLOR_DETENERSE
+ if not mantener_comunicacion(segundos):
+  raise RuntimeError('Se perdio el enlace durante detenerse()')
 
-
-def ejecutar_accesorios(segundos,velocidad_garra,velocidad_pala,direccion='adelante',color_led=COLOR_GARRA_PALA):
- validar_segundos(segundos);establecer_accesorios(velocidad_garra,velocidad_pala,direccion);ib.pixel=color_led
- if not esperar_con_pausa(segundos,color_led):establecer_parada_global();raise RuntimeError('Se perdio el enlace durante accesorios')
+def ejecutar_accesorios(segundos, velocidad_garra, velocidad_pala, direccion='adelante', color_led=COLOR_GARRA_PALA):
+ validar_segundos(segundos)
+ establecer_accesorios(velocidad_garra, velocidad_pala, direccion)
+ ib.pixel = color_led
+ if not mantener_comunicacion(segundos):
+  establecer_parada_global()
+  raise RuntimeError('Se perdio el enlace durante accesorios')
  confirmar_parada(cambiar_color=True)
-
 
 def mover_garra(segundos, velocidad, direccion='adelante'):
  ejecutar_accesorios(segundos, velocidad_garra=velocidad, velocidad_pala=0, direccion=direccion, color_led=COLOR_GARRA)
@@ -540,9 +532,6 @@ def girar(direccion, angulo, velocidad_base):
   while True:
    if not procesar_comunicacion():
     raise RuntimeError('Se perdio el enlace durante girar()')
-   pausa=gestionar_pausa(COLOR_GIRO)
-   if pausa>0:
-    tiempo_inicio+=pausa;tiempo_anterior=time.monotonic();tiempo_estable=None;continue
    tiempo_actual = time.monotonic()
    dt = tiempo_actual - tiempo_anterior
    tiempo_anterior = tiempo_actual
@@ -551,10 +540,7 @@ def girar(direccion, angulo, velocidad_base):
    if abs(velocidad_angular_z) < ZONA_MUERTA_GIRO:
     velocidad_angular_z = 0.0
    if 0 < dt <= 0.1:
-    if comando_detenido and abs(velocidad_angular_z) <= VELOCIDAD_ANGULAR_DETENIDA:
-     incremento = 0.0
-    else:
-     incremento = abs(velocidad_angular_z) * dt
+    incremento = abs(velocidad_angular_z) * dt
     if direccion_actual == direccion:
      angulo_medido += incremento
     else:
@@ -620,65 +606,86 @@ def _mover_hasta_interseccion(numero_interseccion, velocidad_base, direccion_mov
  validar_velocidad(velocidad_base, 'velocidad_base')
  if velocidad_base == 0:
   raise ValueError('velocidad_base debe ser al menos 10')
- bit_direccion=convertir_direccion(direccion_movimiento)
- es_reversa=bit_direccion==DIRECCION_ATRAS
- color_movimiento=COLOR_REVERSA_HASTA if es_reversa else COLOR_AVANCE_HASTA
- texto_movimiento='Reversa' if es_reversa else 'Avance'
- ultimo_diagnostico_sensores=0.0
- contador_intersecciones=0
- tipo_interseccion=None
- muestras_interseccion=0
- muestras_liberacion=0
- interseccion_activa=False
- externo_derecho_visto=False
- externo_izquierdo_visto=False
- ib.pixel=color_movimiento
- establecer_ruedas(velocidad_base,0,direccion=bit_direccion)
- print(texto_movimiento,'hasta la interseccion',numero_interseccion,'| Velocidad base:',velocidad_base,'| Control: infrarrojos')
+ if offset_giroscopio_z is None:
+  raise RuntimeError('El giroscopio no ha sido calibrado')
+ bit_direccion = convertir_direccion(direccion_movimiento)
+ es_reversa = bit_direccion == DIRECCION_ATRAS
+ rumbo_actual = 0.0
+ rumbo_objetivo = 0.0
+ tiempo_anterior = time.monotonic()
+ ultimo_diagnostico_sensores = 0.0
+ contador_intersecciones = 0
+ tipo_interseccion = None
+ muestras_interseccion = 0
+ muestras_liberacion = 0
+ interseccion_activa = False
+ externo_derecho_visto = False
+ externo_izquierdo_visto = False
+ nivel_ei, nivel_ci, nivel_c, nivel_cd, nivel_ed, ext_izq, cen_izq, centro, cen_der, ext_der = leer_sensores_linea()
+ interseccion_activa = False
+ if es_reversa:
+  ib.pixel = COLOR_REVERSA_HASTA
+  texto_movimiento = 'Reversa'
+ else:
+  ib.pixel = COLOR_AVANCE_HASTA
+  texto_movimiento = 'Avance'
+ establecer_ruedas(velocidad_base, 0, direccion=bit_direccion)
+ print(texto_movimiento, 'hasta la interseccion', numero_interseccion, '| Velocidad base:', velocidad_base)
  try:
   while contador_intersecciones < numero_interseccion:
    if not procesar_comunicacion():
-    raise RuntimeError('Se perdio la conexion durante '+('reversa_hasta()' if es_reversa else 'avance_hasta()'))
-   if gestionar_pausa(color_movimiento)>0:
-    ultimo_diagnostico_sensores=time.monotonic();continue
-   nivel_ei,nivel_ci,nivel_c,nivel_cd,nivel_ed,ext_izq,cen_izq,centro,cen_der,ext_der=leer_sensores_linea()
-   ahora=time.monotonic()
-   if MOSTRAR_DIAGNOSTICO_SENSORES and ahora-ultimo_diagnostico_sensores>=INTERVALO_DIAGNOSTICO_SENSORES:
-    print('Sensores: {}{}{}{}{} '.format(nivel_ei,nivel_ci,nivel_c,nivel_cd,nivel_ed).replace('0','-').replace('1','▤'))
-    ultimo_diagnostico_sensores=ahora
-   interseccion_confirmada=False
+    raise RuntimeError('Se perdio la conexion durante ' + ('reversa_hasta()' if es_reversa else 'avance_hasta()'))
+   nivel_ei, nivel_ci, nivel_c, nivel_cd, nivel_ed, ext_izq, cen_izq, centro, cen_der, ext_der = leer_sensores_linea()
+   ahora = time.monotonic()
+   if MOSTRAR_DIAGNOSTICO_SENSORES:
+    if ahora - ultimo_diagnostico_sensores >= INTERVALO_DIAGNOSTICO_SENSORES:
+     print('Sensores: {}{}{}{}{} '.format(nivel_ei, nivel_ci, nivel_c, nivel_cd, nivel_ed).replace('0', '-').replace('1', '▤'))
+     ultimo_diagnostico_sensores = ahora
+   interseccion_confirmada = False
    if interseccion_activa:
-    if not ext_der and not ext_izq:
-     muestras_liberacion+=1
-     if muestras_liberacion>=MUESTRAS_LIBERACION_INTERSECCION:
-      interseccion_activa=False;muestras_liberacion=0;muestras_interseccion=0;externo_derecho_visto=False;externo_izquierdo_visto=False;ib.pixel=color_movimiento
-    else:muestras_liberacion=0
+    if not ext_der and (not ext_izq):
+     muestras_liberacion += 1
+     if muestras_liberacion >= MUESTRAS_LIBERACION_INTERSECCION:
+      interseccion_activa = False
+      muestras_liberacion = 0
+      muestras_interseccion = 0
+      externo_derecho_visto = False
+      externo_izquierdo_visto = False
+      ib.pixel = COLOR_REVERSA_HASTA if es_reversa else COLOR_AVANCE_HASTA
+    else:
+     muestras_liberacion = 0
    elif ext_der or ext_izq:
-    muestras_interseccion+=1
-    externo_derecho_visto=externo_derecho_visto or ext_der
-    externo_izquierdo_visto=externo_izquierdo_visto or ext_izq
-    if muestras_interseccion>=MUESTRAS_CONFIRMACION_INTERSECCION:
-     interseccion_confirmada=True;interseccion_activa=True;muestras_interseccion=0;muestras_liberacion=0;contador_intersecciones+=1
-     tipo_interseccion=clasificar_interseccion(externo_izquierdo_visto,externo_derecho_visto)
+    muestras_interseccion += 1
+    externo_derecho_visto = externo_derecho_visto or ext_der
+    externo_izquierdo_visto = externo_izquierdo_visto or ext_izq
+    if muestras_interseccion >= MUESTRAS_CONFIRMACION_INTERSECCION:
+     interseccion_confirmada = True
+     interseccion_activa = True
+     muestras_interseccion = 0
+     muestras_liberacion = 0
+     contador_intersecciones += 1
+     tipo_interseccion = clasificar_interseccion(externo_izquierdo_visto, externo_derecho_visto)
      indicar_tipo_interseccion(tipo_interseccion)
-     print('Interseccion:',contador_intersecciones,'| Tipo:',tipo_interseccion,'| Movimiento:','reversa' if es_reversa else 'avance')
-     print('Sensores: {}{}{}{}{} '.format(nivel_ei,nivel_ci,nivel_c,nivel_cd,nivel_ed).replace('0','-').replace('1','▤'))
+     print('Interseccion:', contador_intersecciones, '| Tipo:', tipo_interseccion, '| Movimiento:', 'reversa' if es_reversa else 'avance')
+     print('Sensores: {}{}{}{}{} '.format(nivel_ei, nivel_ci, nivel_c, nivel_cd, nivel_ed).replace('0', '-').replace('1', '▤'))
    else:
-    muestras_interseccion=0;externo_derecho_visto=False;externo_izquierdo_visto=False
-   if interseccion_confirmada and contador_intersecciones>=numero_interseccion:
-    confirmar_parada(cambiar_color=False);return tipo_interseccion
-   correccion_logica=correccion_desde_sensores(ext_izq,cen_izq,centro,cen_der,ext_der)
-   if correccion_logica is None:correccion_logica=0
-   correccion_enviada=convertir_correccion_a_direccion(correccion_logica,bit_direccion)
-   establecer_ruedas(velocidad_base,correccion_enviada,direccion=bit_direccion)
+    muestras_interseccion = 0
+    externo_derecho_visto = False
+    externo_izquierdo_visto = False
+   if interseccion_confirmada and contador_intersecciones >= numero_interseccion:
+    confirmar_parada(cambiar_color=False)
+    return tipo_interseccion
+   correccion_ir = correccion_desde_sensores(ext_izq, cen_izq, centro, cen_der, ext_der)
+   rumbo_actual, tiempo_anterior, correccion_logica, correccion_enviada, error_rumbo, velocidad_angular_z, fuente = aplicar_control_rumbo(rumbo_actual, rumbo_objetivo, velocidad_base, bit_direccion, tiempo_anterior, correccion_infrarroja=correccion_ir)
    if MOSTRAR_DIAGNOSTICO_CONTROL:
-    print('Fuente: infrarrojos','| Correccion logica:',correccion_logica,'| Correccion enviada:',correccion_enviada)
+    print('Fuente:', fuente, '| Error gyro:', round(error_rumbo, 2), '| Correccion logica:', correccion_logica, '| Correccion enviada:', correccion_enviada)
    if not procesar_comunicacion():
-    raise RuntimeError('Se perdio la conexion durante '+('reversa_hasta()' if es_reversa else 'avance_hasta()'))
+    raise RuntimeError('Se perdio la conexion durante ' + ('reversa_hasta()' if es_reversa else 'avance_hasta()'))
    time.sleep(0.001)
  except Exception:
   establecer_parada_global()
-  if connected:mantener_comunicacion(TIEMPO_CONFIRMACION_PARADA)
+  if connected:
+   mantener_comunicacion(TIEMPO_CONFIRMACION_PARADA)
   raise
  confirmar_parada(cambiar_color=False)
  return tipo_interseccion

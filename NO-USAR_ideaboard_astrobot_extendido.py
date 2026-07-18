@@ -278,10 +278,10 @@ def convertir_direccion_giro(direccion):
     direccion = direccion.strip().lower()
 
     if direccion == "izquierda":
-        return DIRECCION_ADELANTE
+        return DIRECCION_ATRAS
 
     if direccion == "derecha":
-        return DIRECCION_ATRAS
+        return DIRECCION_ADELANTE
 
     raise ValueError("direccion debe ser 'izquierda' o 'derecha'")
 
