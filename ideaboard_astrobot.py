@@ -43,7 +43,7 @@ sensor_externo_izquierdo = ib.DigitalIn(board.IO39, pull=ib.UP)
 SENSOR_NEGRO_ES_LOW = False
 CORRECCION_LINEA = 1
 SIGNO_CORRECCION_LINEA = -1
-MUESTRAS_CONFIRMACION_INTERSECCION = 2
+MUESTRAS_CONFIRMACION_INTERSECCION = 1
 MUESTRAS_LIBERACION_INTERSECCION = 3
 MOSTRAR_DIAGNOSTICO_SENSORES = True
 INTERVALO_DIAGNOSTICO_SENSORES = 0.3
@@ -620,89 +620,65 @@ def _mover_hasta_interseccion(numero_interseccion, velocidad_base, direccion_mov
  validar_velocidad(velocidad_base, 'velocidad_base')
  if velocidad_base == 0:
   raise ValueError('velocidad_base debe ser al menos 10')
- if offset_giroscopio_z is None:
-  raise RuntimeError('El giroscopio no ha sido calibrado')
- bit_direccion = convertir_direccion(direccion_movimiento)
- es_reversa = bit_direccion == DIRECCION_ATRAS
- rumbo_actual = 0.0
- rumbo_objetivo = 0.0
- tiempo_anterior = time.monotonic()
- ultimo_diagnostico_sensores = 0.0
- contador_intersecciones = 0
- tipo_interseccion = None
- muestras_interseccion = 0
- muestras_liberacion = 0
- interseccion_activa = False
- externo_derecho_visto = False
- externo_izquierdo_visto = False
- nivel_ei, nivel_ci, nivel_c, nivel_cd, nivel_ed, ext_izq, cen_izq, centro, cen_der, ext_der = leer_sensores_linea()
- interseccion_activa = False
- if es_reversa:
-  ib.pixel = COLOR_REVERSA_HASTA
-  texto_movimiento = 'Reversa'
- else:
-  ib.pixel = COLOR_AVANCE_HASTA
-  texto_movimiento = 'Avance'
- establecer_ruedas(velocidad_base, 0, direccion=bit_direccion)
- print(texto_movimiento, 'hasta la interseccion', numero_interseccion, '| Velocidad base:', velocidad_base)
+ bit_direccion=convertir_direccion(direccion_movimiento)
+ es_reversa=bit_direccion==DIRECCION_ATRAS
+ color_movimiento=COLOR_REVERSA_HASTA if es_reversa else COLOR_AVANCE_HASTA
+ texto_movimiento='Reversa' if es_reversa else 'Avance'
+ ultimo_diagnostico_sensores=0.0
+ contador_intersecciones=0
+ tipo_interseccion=None
+ muestras_interseccion=0
+ muestras_liberacion=0
+ interseccion_activa=False
+ externo_derecho_visto=False
+ externo_izquierdo_visto=False
+ ib.pixel=color_movimiento
+ establecer_ruedas(velocidad_base,0,direccion=bit_direccion)
+ print(texto_movimiento,'hasta la interseccion',numero_interseccion,'| Velocidad base:',velocidad_base,'| Control: infrarrojos')
  try:
   while contador_intersecciones < numero_interseccion:
    if not procesar_comunicacion():
-    raise RuntimeError('Se perdio la conexion durante ' + ('reversa_hasta()' if es_reversa else 'avance_hasta()'))
-   color_movimiento=COLOR_REVERSA_HASTA if es_reversa else COLOR_AVANCE_HASTA
-   pausa=gestionar_pausa(color_movimiento)
-   if pausa>0:tiempo_anterior=time.monotonic();ultimo_diagnostico_sensores=tiempo_anterior;continue
-   nivel_ei, nivel_ci, nivel_c, nivel_cd, nivel_ed, ext_izq, cen_izq, centro, cen_der, ext_der = leer_sensores_linea()
-   ahora = time.monotonic()
-   if MOSTRAR_DIAGNOSTICO_SENSORES:
-    if ahora - ultimo_diagnostico_sensores >= INTERVALO_DIAGNOSTICO_SENSORES:
-     print('Sensores: {}{}{}{}{} '.format(nivel_ei, nivel_ci, nivel_c, nivel_cd, nivel_ed).replace('0', '-').replace('1', '▤'))
-     ultimo_diagnostico_sensores = ahora
-   interseccion_confirmada = False
+    raise RuntimeError('Se perdio la conexion durante '+('reversa_hasta()' if es_reversa else 'avance_hasta()'))
+   if gestionar_pausa(color_movimiento)>0:
+    ultimo_diagnostico_sensores=time.monotonic();continue
+   nivel_ei,nivel_ci,nivel_c,nivel_cd,nivel_ed,ext_izq,cen_izq,centro,cen_der,ext_der=leer_sensores_linea()
+   ahora=time.monotonic()
+   if MOSTRAR_DIAGNOSTICO_SENSORES and ahora-ultimo_diagnostico_sensores>=INTERVALO_DIAGNOSTICO_SENSORES:
+    print('Sensores: {}{}{}{}{} '.format(nivel_ei,nivel_ci,nivel_c,nivel_cd,nivel_ed).replace('0','-').replace('1','▤'))
+    ultimo_diagnostico_sensores=ahora
+   interseccion_confirmada=False
    if interseccion_activa:
-    if not ext_der and (not ext_izq):
-     muestras_liberacion += 1
-     if muestras_liberacion >= MUESTRAS_LIBERACION_INTERSECCION:
-      interseccion_activa = False
-      muestras_liberacion = 0
-      muestras_interseccion = 0
-      externo_derecho_visto = False
-      externo_izquierdo_visto = False
-      ib.pixel = COLOR_REVERSA_HASTA if es_reversa else COLOR_AVANCE_HASTA
-    else:
-     muestras_liberacion = 0
+    if not ext_der and not ext_izq:
+     muestras_liberacion+=1
+     if muestras_liberacion>=MUESTRAS_LIBERACION_INTERSECCION:
+      interseccion_activa=False;muestras_liberacion=0;muestras_interseccion=0;externo_derecho_visto=False;externo_izquierdo_visto=False;ib.pixel=color_movimiento
+    else:muestras_liberacion=0
    elif ext_der or ext_izq:
-    muestras_interseccion += 1
-    externo_derecho_visto = externo_derecho_visto or ext_der
-    externo_izquierdo_visto = externo_izquierdo_visto or ext_izq
-    if muestras_interseccion >= MUESTRAS_CONFIRMACION_INTERSECCION:
-     interseccion_confirmada = True
-     interseccion_activa = True
-     muestras_interseccion = 0
-     muestras_liberacion = 0
-     contador_intersecciones += 1
-     tipo_interseccion = clasificar_interseccion(externo_izquierdo_visto, externo_derecho_visto)
+    muestras_interseccion+=1
+    externo_derecho_visto=externo_derecho_visto or ext_der
+    externo_izquierdo_visto=externo_izquierdo_visto or ext_izq
+    if muestras_interseccion>=MUESTRAS_CONFIRMACION_INTERSECCION:
+     interseccion_confirmada=True;interseccion_activa=True;muestras_interseccion=0;muestras_liberacion=0;contador_intersecciones+=1
+     tipo_interseccion=clasificar_interseccion(externo_izquierdo_visto,externo_derecho_visto)
      indicar_tipo_interseccion(tipo_interseccion)
-     print('Interseccion:', contador_intersecciones, '| Tipo:', tipo_interseccion, '| Movimiento:', 'reversa' if es_reversa else 'avance')
-     print('Sensores: {}{}{}{}{} '.format(nivel_ei, nivel_ci, nivel_c, nivel_cd, nivel_ed).replace('0', '-').replace('1', '▤'))
+     print('Interseccion:',contador_intersecciones,'| Tipo:',tipo_interseccion,'| Movimiento:','reversa' if es_reversa else 'avance')
+     print('Sensores: {}{}{}{}{} '.format(nivel_ei,nivel_ci,nivel_c,nivel_cd,nivel_ed).replace('0','-').replace('1','▤'))
    else:
-    muestras_interseccion = 0
-    externo_derecho_visto = False
-    externo_izquierdo_visto = False
-   if interseccion_confirmada and contador_intersecciones >= numero_interseccion:
-    confirmar_parada(cambiar_color=False)
-    return tipo_interseccion
-   correccion_ir = correccion_desde_sensores(ext_izq, cen_izq, centro, cen_der, ext_der)
-   rumbo_actual, tiempo_anterior, correccion_logica, correccion_enviada, error_rumbo, velocidad_angular_z, fuente = aplicar_control_rumbo(rumbo_actual, rumbo_objetivo, velocidad_base, bit_direccion, tiempo_anterior, correccion_infrarroja=correccion_ir)
+    muestras_interseccion=0;externo_derecho_visto=False;externo_izquierdo_visto=False
+   if interseccion_confirmada and contador_intersecciones>=numero_interseccion:
+    confirmar_parada(cambiar_color=False);return tipo_interseccion
+   correccion_logica=correccion_desde_sensores(ext_izq,cen_izq,centro,cen_der,ext_der)
+   if correccion_logica is None:correccion_logica=0
+   correccion_enviada=convertir_correccion_a_direccion(correccion_logica,bit_direccion)
+   establecer_ruedas(velocidad_base,correccion_enviada,direccion=bit_direccion)
    if MOSTRAR_DIAGNOSTICO_CONTROL:
-    print('Fuente:', fuente, '| Error gyro:', round(error_rumbo, 2), '| Correccion logica:', correccion_logica, '| Correccion enviada:', correccion_enviada)
+    print('Fuente: infrarrojos','| Correccion logica:',correccion_logica,'| Correccion enviada:',correccion_enviada)
    if not procesar_comunicacion():
-    raise RuntimeError('Se perdio la conexion durante ' + ('reversa_hasta()' if es_reversa else 'avance_hasta()'))
+    raise RuntimeError('Se perdio la conexion durante '+('reversa_hasta()' if es_reversa else 'avance_hasta()'))
    time.sleep(0.001)
  except Exception:
   establecer_parada_global()
-  if connected:
-   mantener_comunicacion(TIEMPO_CONFIRMACION_PARADA)
+  if connected:mantener_comunicacion(TIEMPO_CONFIRMACION_PARADA)
   raise
  confirmar_parada(cambiar_color=False)
  return tipo_interseccion

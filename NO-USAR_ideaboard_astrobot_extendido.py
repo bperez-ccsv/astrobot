@@ -1287,7 +1287,7 @@ def girar(direccion, angulo, velocidad_base):
 
 # ==========================================================
 # AVANCE / REVERSA HASTA INTERSECCION
-# GIROSCOPIO + CINCO SENSORES DIGITALES
+# SOLO CINCO SENSORES INFRARROJOS DIGITALES
 # ==========================================================
 
 
@@ -1316,6 +1316,12 @@ def _mover_hasta_interseccion(
     velocidad_base,
     direccion_movimiento
 ):
+    """
+    Avanza o retrocede hasta la interseccion solicitada utilizando
+    exclusivamente los cinco sensores infrarrojos.
+
+    El giroscopio no se consulta dentro de esta funcion.
+    """
     if not isinstance(numero_interseccion, int):
         raise ValueError("numero_interseccion debe ser entero")
 
@@ -1327,53 +1333,31 @@ def _mover_hasta_interseccion(
     if velocidad_base == 0:
         raise ValueError("velocidad_base debe ser al menos 10")
 
-    if offset_giroscopio_z is None:
-        raise RuntimeError("El giroscopio no ha sido calibrado")
-
     bit_direccion = convertir_direccion(direccion_movimiento)
     es_reversa = bit_direccion == DIRECCION_ATRAS
 
-    rumbo_actual = 0.0
-    rumbo_objetivo = 0.0
-    tiempo_anterior = time.monotonic()
     ultimo_diagnostico_sensores = 0.0
-
     contador_intersecciones = 0
     tipo_interseccion = None
 
-    # Estado del filtro de intersecciones.
+    # Estado del filtro que evita contar varias veces la misma interseccion.
     muestras_interseccion = 0
     muestras_liberacion = 0
     interseccion_activa = False
     externo_derecho_visto = False
     externo_izquierdo_visto = False
 
-    (
-        nivel_ei,
-        nivel_ci,
-        nivel_c,
-        nivel_cd,
-        nivel_ed,
-        ext_izq,
-        cen_izq,
-        centro,
-        cen_der,
-        ext_der
-    ) = leer_sensores_linea()
-
-    # La lectura inicial tambien puede representar la primera interseccion.
-    # No se bloquea el conteo si EI o ED ya esta en LOW al entrar a la
-    # funcion. Una vez contada, interseccion_activa evita duplicarla hasta
-    # que ambos sensores externos regresen a HIGH.
-    interseccion_activa = False
-
     if es_reversa:
-        ib.pixel = COLOR_REVERSA_HASTA
+        color_movimiento = COLOR_REVERSA_HASTA
         texto_movimiento = "Reversa"
     else:
-        ib.pixel = COLOR_AVANCE_HASTA
+        color_movimiento = COLOR_AVANCE_HASTA
         texto_movimiento = "Avance"
 
+    ib.pixel = color_movimiento
+
+    # Inicia recto. A partir de la primera lectura, solamente los sensores
+    # infrarrojos determinan la correccion enviada a SPIKE.
     establecer_ruedas(
         velocidad_base,
         0,
@@ -1384,7 +1368,8 @@ def _mover_hasta_interseccion(
         texto_movimiento,
         "hasta la interseccion",
         numero_interseccion,
-        "| Velocidad base:", velocidad_base
+        "| Velocidad base:", velocidad_base,
+        "| Control: infrarrojos"
     )
 
     try:
@@ -1395,16 +1380,10 @@ def _mover_hasta_interseccion(
                     + ("reversa_hasta()" if es_reversa else "avance_hasta()")
                 )
 
-            color_movimiento = (
-                COLOR_REVERSA_HASTA
-                if es_reversa
-                else COLOR_AVANCE_HASTA
-            )
             duracion_pausa = gestionar_pausa(color_movimiento)
 
             if duracion_pausa > 0:
-                tiempo_anterior = time.monotonic()
-                ultimo_diagnostico_sensores = tiempo_anterior
+                ultimo_diagnostico_sensores = time.monotonic()
                 continue
 
             (
@@ -1427,7 +1406,15 @@ def _mover_hasta_interseccion(
                     ahora - ultimo_diagnostico_sensores
                     >= INTERVALO_DIAGNOSTICO_SENSORES
                 ):
-                    print("Sensores: {}{}{}{}{} ".format(nivel_ei, nivel_ci, nivel_c, nivel_cd, nivel_ed).replace("0", "-").replace("1", "▤"))
+                    print(
+                        "Sensores: {}{}{}{}{} ".format(
+                            nivel_ei,
+                            nivel_ci,
+                            nivel_c,
+                            nivel_cd,
+                            nivel_ed
+                        ).replace("0", "-").replace("1", "▤")
+                    )
                     ultimo_diagnostico_sensores = ahora
 
             interseccion_confirmada = False
@@ -1442,12 +1429,7 @@ def _mover_hasta_interseccion(
                         muestras_interseccion = 0
                         externo_derecho_visto = False
                         externo_izquierdo_visto = False
-
-                        ib.pixel = (
-                            COLOR_REVERSA_HASTA
-                            if es_reversa
-                            else COLOR_AVANCE_HASTA
-                        )
+                        ib.pixel = color_movimiento
                 else:
                     muestras_liberacion = 0
 
@@ -1484,7 +1466,15 @@ def _mover_hasta_interseccion(
                             "| Movimiento:",
                             "reversa" if es_reversa else "avance"
                         )
-                        print("Sensores: {}{}{}{}{} ".format(nivel_ei, nivel_ci, nivel_c, nivel_cd, nivel_ed).replace("0", "-").replace("1", "▤"))
+                        print(
+                            "Sensores: {}{}{}{}{} ".format(
+                                nivel_ei,
+                                nivel_ci,
+                                nivel_c,
+                                nivel_cd,
+                                nivel_ed
+                            ).replace("0", "-").replace("1", "▤")
+                        )
                 else:
                     muestras_interseccion = 0
                     externo_derecho_visto = False
@@ -1497,9 +1487,10 @@ def _mover_hasta_interseccion(
                 confirmar_parada(cambiar_color=False)
                 return tipo_interseccion
 
-            # Los sensores internos tienen prioridad sobre el giroscopio
-            # solo cuando los sensores externos no indican interseccion.
-            correccion_ir = correccion_desde_sensores(
+            # La correccion proviene exclusivamente de los sensores internos.
+            # None significa centro, lectura ambigua, linea perdida o cruce de
+            # una interseccion; en todos esos casos se continua recto.
+            correccion_logica = correccion_desde_sensores(
                 ext_izq,
                 cen_izq,
                 centro,
@@ -1507,27 +1498,23 @@ def _mover_hasta_interseccion(
                 ext_der
             )
 
-            (
-                rumbo_actual,
-                tiempo_anterior,
+            if correccion_logica is None:
+                correccion_logica = 0
+
+            correccion_enviada = convertir_correccion_a_direccion(
                 correccion_logica,
-                correccion_enviada,
-                error_rumbo,
-                velocidad_angular_z,
-                fuente
-            ) = aplicar_control_rumbo(
-                rumbo_actual,
-                rumbo_objetivo,
+                bit_direccion
+            )
+
+            establecer_ruedas(
                 velocidad_base,
-                bit_direccion,
-                tiempo_anterior,
-                correccion_infrarroja=correccion_ir
+                correccion_enviada,
+                direccion=bit_direccion
             )
 
             if MOSTRAR_DIAGNOSTICO_CONTROL:
                 print(
-                    "Fuente:", fuente,
-                    "| Error gyro:", round(error_rumbo, 2),
+                    "Fuente: infrarrojos",
                     "| Correccion logica:", correccion_logica,
                     "| Correccion enviada:", correccion_enviada
                 )
