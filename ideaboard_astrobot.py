@@ -3,7 +3,6 @@ import math
 import board
 import busio
 import digitalio
-import keypad
 import struct
 from ideaboard import IdeaBoard
 from adafruit_lsm6ds.lsm6ds3trc import LSM6DS3TRC
@@ -26,15 +25,29 @@ DIRECCION_ATRAS = 1
 CODIGO_GIRO_SOBRE_EJE = 7
 MENSAJE_DETENER = 3
 mensaje_actual = MENSAJE_DETENER
-keys = keypad.Keys((board.IO0,), value_when_pressed=False, pull=True)
+p0=digitalio.DigitalInOut(board.IO0)
+p0.switch_to_input(pull=digitalio.Pull.UP)
+p1=digitalio.DigitalInOut(board.IO27)
+p1.switch_to_input(pull=digitalio.Pull.UP)
+be=1
+bc=1
+bt=time.monotonic()
 
 def _a():
- a = keys.events.get()
- return bool(a and a.released)
+ global be,bc,bt
+ n=p0.value and p1.value
+ t=time.monotonic()
+ if n!=bc:
+  bc=n;bt=t;return False
+ if n!=be and t-bt>=.03:
+  a=be;be=n;return not a and n
+ return False
 
 def _b():
- while keys.events.get() is not None:
-  pass
+ global be,bc,bt
+ be=p0.value and p1.value
+ bc=be
+ bt=time.monotonic()
 sensor_externo_derecho = ib.DigitalIn(board.IO33, pull=ib.UP)
 sensor_centro_derecho = ib.DigitalIn(board.IO32, pull=ib.UP)
 sensor_centro = ib.DigitalIn(board.IO35, pull=ib.UP)
@@ -337,7 +350,7 @@ def _H(color_reanudar):
  a = time.monotonic()
  _s()
  ib.pixel = COLOR_PAUSA
- print('Programa pausado. Presione BOOT para continuar.')
+ print('Programa pausado. Presione BOOT o IO27 para continuar.')
  while connected:
   if not _F():
    raise RuntimeError('Se perdio el enlace durante la pausa')
@@ -873,7 +886,7 @@ def _af():
  _b()
  ib.pixel = COLOR_ESPERANDO_BOTON
  print('Handshake completado.')
- print('Presione y suelte el boton BOOT para iniciar.')
+ print('Presione y suelte BOOT o IO27 para iniciar.')
  while connected:
   if not _F():
    return False
@@ -887,7 +900,7 @@ __all__ = ('avance', 'reversa', 'detenerse', 'girar', 'avance_hasta', 'reversa_h
 
 def iniciar(programa_usuario):
  global connected
- print('Iniciando biblioteca CCSV: version 260721.1135')
+ print('Iniciando biblioteca CCSV: version 260721.1325')
  while True:
   if not _K():
    ib.pixel = COLOR_ERROR

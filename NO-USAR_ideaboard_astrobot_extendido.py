@@ -14,7 +14,6 @@ import math
 import board
 import busio
 import digitalio
-import keypad
 import struct
 
 from ideaboard import IdeaBoard
@@ -71,24 +70,66 @@ mensaje_actual = MENSAJE_DETENER
 
 
 # ==========================================================
-# BOTON IO0
+# BOTONES IO0 E IO27
+# Ambos se conectan a GND y utilizan pull-up interno.
+# La accion se confirma al soltar el boton.
 # ==========================================================
 
-keys = keypad.Keys(
-    (board.IO0,),
-    value_when_pressed=False,
-    pull=True
-)
+BOTON_REBOTE_SEGUNDOS = 0.03
+
+boton_boot = digitalio.DigitalInOut(board.IO0)
+boton_boot.switch_to_input(pull=digitalio.Pull.UP)
+
+boton_externo = digitalio.DigitalInOut(board.IO27)
+boton_externo.switch_to_input(pull=digitalio.Pull.UP)
+
+_nivel_boton_estable = True
+_nivel_boton_candidato = True
+_tiempo_cambio_boton = time.monotonic()
+
+
+def _leer_nivel_botones():
+    # HIGH cuando ambos estan libres; LOW cuando cualquiera esta pulsado.
+    return bool(boton_boot.value and boton_externo.value)
 
 
 def boton_presionado():
-    evento = keys.events.get()
-    return bool(evento and evento.released)
+    """Retorna True una vez al soltar IO0 o IO27, con antirrebote."""
+    global _nivel_boton_estable
+    global _nivel_boton_candidato
+    global _tiempo_cambio_boton
+
+    nivel = _leer_nivel_botones()
+    ahora = time.monotonic()
+
+    if nivel != _nivel_boton_candidato:
+        _nivel_boton_candidato = nivel
+        _tiempo_cambio_boton = ahora
+        return False
+
+    if (
+        nivel != _nivel_boton_estable
+        and ahora - _tiempo_cambio_boton >= BOTON_REBOTE_SEGUNDOS
+    ):
+        nivel_anterior = _nivel_boton_estable
+        _nivel_boton_estable = nivel
+
+        # Evento al pasar de pulsado (LOW) a libre (HIGH).
+        return (not nivel_anterior) and nivel
+
+    return False
 
 
 def limpiar_eventos_boton():
-    while keys.events.get() is not None:
-        pass
+    """Sincroniza el estado sin generar un evento atrasado."""
+    global _nivel_boton_estable
+    global _nivel_boton_candidato
+    global _tiempo_cambio_boton
+
+    nivel = _leer_nivel_botones()
+    _nivel_boton_estable = nivel
+    _nivel_boton_candidato = nivel
+    _tiempo_cambio_boton = time.monotonic()
 
 
 # ==========================================================
@@ -649,7 +690,7 @@ def gestionar_pausa(color_reanudar):
     inicio_pausa = time.monotonic()
     establecer_parada_global()
     ib.pixel = COLOR_PAUSA
-    print("Programa pausado. Presione BOOT para continuar.")
+    print("Programa pausado. Presione IO0 o IO27 para continuar.")
 
     while connected:
         if not procesar_comunicacion():
@@ -1787,7 +1828,7 @@ def esperar_boton_inicio():
     ib.pixel = COLOR_ESPERANDO_BOTON
 
     print("Handshake completado.")
-    print("Presione y suelte el boton BOOT para iniciar.")
+    print("Presione y suelte IO0 o IO27 para iniciar.")
 
     while connected:
         if not procesar_comunicacion():
@@ -1828,10 +1869,10 @@ __all__ = (
 def iniciar(programa_usuario):
     """
     Inicia la comunicacion con SPIKE y ejecuta la funcion suministrada
-    cada vez que el usuario presiona y suelta el boton BOOT.
+    cada vez que el usuario presiona y suelta el boton IO0 o IO27.
 
     El giroscopio se calibra automaticamente antes de cada ejecucion.
-El boton BOOT pausa y reanuda las funciones de movimiento.
+El boton IO0 o IO27 pausa y reanuda las funciones de movimiento.
 
     Uso en code.py:
 
@@ -1844,9 +1885,7 @@ El boton BOOT pausa y reanuda las funciones de movimiento.
     """
     global connected
 
-    print(
-        "Iniciando biblioteca CCSV: version 260721.1135"
-    )
+    print('Iniciando biblioteca CCSV: version 260721.1325')
 
     while True:
         if not conectar_spike():
@@ -1860,7 +1899,7 @@ El boton BOOT pausa y reanuda las funciones de movimiento.
                     break
 
                 # La calibracion ocurre solamente despues de presionar
-                # y soltar el boton BOOT.
+                # y soltar el boton IO0 o IO27.
                 calibrar_giroscopio()
                 programa_usuario()
                 confirmar_parada(cambiar_color=True)
